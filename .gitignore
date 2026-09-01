@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments and build output
+.venv/
+venv/
+build/
+dist/
+
+# Editors
+.vscode/
+.idea/
+
+# Local entry point
+/scripts/main.py
+
+# Datasets, experiments and generated artifacts
+/dataset/
+/models/
+/teaching/
+/debug/
+/runs/
+*.pt
+*.zip
