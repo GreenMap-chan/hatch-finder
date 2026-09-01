@@ -1,5 +1,32 @@
 # hatch-finder
 
+`hatchfinder` is an experimental PyTorch library for locating a supplied hatch
+pattern inside a masked region of a drawing. The model produces a probability
+heatmap with the same spatial dimensions as the drawing.
+
+The project is currently in alpha. Its API, model format, and configuration may
+change between releases.
+
+## Installation
+
+Install the package from PyPI:
+
+```console
+pip install hatchfinder
+```
+
+To work with the example dataset and configuration files, clone the repository
+and install it in editable mode:
+
+```console
+git clone https://github.com/GreenMap-chan/hatch-finder.git
+cd hatch-finder
+pip install -e .
+```
+
+Python 3.11 or newer is required. PyTorch selects CPU or CUDA automatically
+when `runtime.device` is set to `auto`.
+
 ## Tested environment
 
 The project has been tested with the following versions:
@@ -13,6 +40,71 @@ The project has been tested with the following versions:
 - tqdm 4.70.0
 
 The tested PyTorch and Torchvision packages are nightly builds for CUDA 12.8.
+Other PyTorch and Torchvision versions allowed by the package metadata have not
+yet been verified.
+
+## Inference
+
+Create a model from a saved `.pt` file and pass paths or Pillow images to
+`infer`:
+
+```python
+from pathlib import Path
+
+from hatchfinder import HatchFinder
+
+model = HatchFinder(
+    load_model_path=Path("model.pt"),
+    device="auto",
+)
+
+heatmap = model.infer(
+    drawing=Path("drawing.png"),
+    mask=Path("search_mask.png"),
+    hatch=Path("hatch.png"),
+    debug_path=Path("debug"),
+    confidence=0.5,
+)
+
+print(heatmap.shape)  # [1, 1, height, width]
+```
+
+`drawing` and `hatch` are converted to RGB. `mask` is converted to grayscale
+and binarized at `0.5`. The returned tensor contains probabilities in the
+masked area and zeros outside it. When `debug_path` is provided, an overlay is
+saved as `<drawing_name>_debug.png`.
+
+## Training
+
+Load a YAML configuration and start training:
+
+```python
+from pathlib import Path
+
+from hatchfinder import Train, load_config
+
+config = load_config(Path("examples/full_config.yaml"))
+Train(config).train()
+```
+
+Relative paths in a configuration file are resolved relative to that YAML
+file, not to the current working directory. Training writes the resolved
+configuration, a log, `best.pt`, and `last.pt` to the configured output
+directory.
+
+`best.pt` and `last.pt` are resumable training checkpoints. To create a smaller
+model-only file for inference:
+
+```python
+from pathlib import Path
+
+from hatchfinder import convert_checkpoint_to_model
+
+convert_checkpoint_to_model(
+    Path("runs/full_sample/best.pt"),
+    Path("runs/full_sample/model.pt"),
+)
+```
 
 ## Dataset structure
 
@@ -54,13 +146,17 @@ image may have a different size.
 
 ## Sample dataset
 
-`examples/sample_dataset` contains 20 training and 10 validation examples. It
-is intentionally small and is only suitable for checking the data pipeline and
-training loop, not for training an accurate model. Each split contains an equal
-number of positive and negative examples.
+[`examples/sample_dataset`](https://github.com/GreenMap-chan/hatch-finder/tree/main/examples/sample_dataset)
+contains 20 training and 10 validation examples. It is intentionally small and
+is only suitable for checking the data pipeline and training loop, not for
+training an accurate model. Each split contains an equal number of positive and
+negative examples. The sample dataset is stored in the GitHub repository and is
+not installed by `pip`.
 
-The minimal CPU configuration in `examples/smoke_test.yaml` uses a reduced
-model and runs one epoch on this sample dataset. From the repository root:
+The minimal CPU configuration in
+[`examples/smoke_test.yaml`](https://github.com/GreenMap-chan/hatch-finder/blob/main/examples/smoke_test.yaml)
+uses a reduced model and runs one epoch on this sample dataset. From the
+repository root:
 
 ```python
 from pathlib import Path
@@ -72,3 +168,11 @@ Train(config).train()
 ```
 
 Training output is written to `runs/sample`.
+
+The full example configuration is available at
+[`examples/full_config.yaml`](https://github.com/GreenMap-chan/hatch-finder/blob/main/examples/full_config.yaml).
+
+## License
+
+Licensed under the Apache License 2.0. See
+[`LICENSE`](https://github.com/GreenMap-chan/hatch-finder/blob/main/LICENSE).
