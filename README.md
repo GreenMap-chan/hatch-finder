@@ -92,6 +92,15 @@ file, not to the current working directory. Training writes the resolved
 configuration, a log, `best.pt`, and `last.pt` to the configured output
 directory.
 
+Using `batch_size: 1` is strongly recommended when hatch images in the dataset
+have different dimensions. Batches containing multiple examples pad smaller
+hatch images to the largest height and width in the batch. The padding uses a
+white background and may affect the hatch encoder. To retain a larger effective
+batch without padding multiple hatch images together, keep `batch_size: 1` and
+raise `gradient_accumulation_steps` instead. This is not a concern when all
+hatch images in the dataset have the same dimensions, in which case a larger
+batch size can be used.
+
 `best.pt` and `last.pt` are resumable training checkpoints. To create a smaller
 model-only file for inference:
 
