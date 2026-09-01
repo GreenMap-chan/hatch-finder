@@ -38,12 +38,12 @@ training:
   checkpoint_path: null
 
 data:
-  dataset: "./dataset"
+  dataset: "./sample_dataset"
   drawing_pad_multiple: 64
   load_dataset_examples: 16
 
 output:
-  directory: "./runs"
+  directory: "../runs/full_sample"
   log_file_name: "log.txt"
 
 runtime:

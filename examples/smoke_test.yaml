@@ -1,0 +1,28 @@
+model:
+  drawing_channels: [8, 16, 32]
+  hatch_channels: [8, 16, 32]
+  hatch_pool_sizes: [2, 3, 4]
+  match_dims: [0, 0, 32]
+  match_feature_dims: [0, 0, 8]
+  matcher_channels: [32, 16]
+  drawing_residual_blocks: [0, 0, 0]
+  hatch_residual_blocks: [0, 0, 0]
+  group_norm_groups_drawings: 4
+  group_norm_groups_hatchings: 4
+
+training:
+  epochs: 1
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  patience: 1
+  num_workers: 0
+  bf16: false
+
+data:
+  dataset: "./sample_dataset"
+
+output:
+  directory: "../runs/sample"
+
+runtime:
+  device: cpu
