@@ -1,3 +1,5 @@
+from importlib.metadata import PackageNotFoundError, version
+
 from .config import (
     AugmentationSettings,
     Config,
@@ -29,4 +31,7 @@ __all__ = [
     "convert_checkpoint_to_model",
 ]
 
-__version__ = "0.1.0"
+try:
+    __version__ = version("hatchfinder")
+except PackageNotFoundError:
+    __version__ = "0.0.0+unknown"
