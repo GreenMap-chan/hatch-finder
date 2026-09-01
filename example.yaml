@@ -1,0 +1,87 @@
+model:
+  drawing_channels: [32, 64, 128]
+  hatch_channels: [32, 64, 128]
+  hatch_pool_sizes: [2, 4, 6]
+
+  match_dims: [64, 128, 256]
+  match_feature_dims: [8, 16, 32]
+  matcher_channels: [256, 64]
+
+  drawing_residual_blocks: [1, 1, 1]
+  hatch_residual_blocks: [1, 1, 1]
+
+  group_norm_groups_drawings: 8
+  group_norm_groups_hatchings: 8
+
+  kernel_size: 3
+  downsample_stride: 2
+
+training:
+  learning_rate: 0.00003
+  weight_decay: 0.01
+  epochs: 150
+
+  batch_size: 1
+  gradient_accumulation_steps: 16
+  patience: 8
+  num_workers: 4
+
+  metric: val_loss
+  warmup_epochs: 0
+
+  max_grad_norm: 1.0
+  seed: 42
+  bf16: true
+  eta_min: 0.000001
+  decay_parameters: [".weight"]
+  load_model_path: null
+  checkpoint_path: null
+
+data:
+  dataset: "./dataset"
+  drawing_pad_multiple: 64
+  load_dataset_examples: 16
+
+output:
+  directory: "./runs"
+  log_file_name: "log.txt"
+
+runtime:
+  device: auto
+
+augmentation:
+  enabled: true
+  seed: 42
+  max_retries: 5
+
+  horizontal_flip_probability: 0.5
+  vertical_flip_probability: 0.5
+
+  drawing_rotate_90_probability: 0.75
+  hatch_rotate_90_probability: 0.75
+
+  affine_probability: 0.5
+  affine_angle_degrees: 2.0
+  affine_translate_percent: 0.02
+  affine_scale_min: 0.95
+  affine_scale_max: 1.05
+
+  brightness_probability: 0.3
+  brightness_min: 0.9
+  brightness_max: 1.1
+
+  contrast_probability: 0.3
+  contrast_min: 0.85
+  contrast_max: 1.15
+
+  gamma_probability: 0.2
+  gamma_min: 0.9
+  gamma_max: 1.1
+
+  blur_probability: 0.15
+  blur_sigma_min: 0.1
+  blur_sigma_max: 0.8
+
+  noise_probability: 0.2
+  noise_std_min: 0.002
+  noise_std_max: 0.015
