@@ -43,6 +43,13 @@ The tested PyTorch and Torchvision packages are nightly builds for CUDA 12.8.
 Other PyTorch and Torchvision versions allowed by the package metadata have not
 yet been verified.
 
+## Pretrained weights
+
+Pretrained weights are available in the
+[`GreenMap/hatch-finder-3.5m`](https://huggingface.co/GreenMap/hatch-finder-3.5m)
+model repository on Hugging Face. After downloading the `.pt` model file, pass
+its local path to `HatchFinder` through `load_model_path`, as shown below.
+
 ## Inference
 
 Create a model from a saved `.pt` file and pass paths or Pillow images to
