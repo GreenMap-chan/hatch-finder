@@ -47,6 +47,7 @@ yet been verified.
 
 Pretrained weights are available in the
 [`GreenMap/hatch-finder-3.5m`](https://huggingface.co/GreenMap/hatch-finder-3.5m)
+[`GreenMap/hatch-finder-11m`](https://huggingface.co/GreenMap/hatch-finder-11m)
 model repository on Hugging Face. After downloading the `.pt` model file, pass
 its local path to `HatchFinder` through `load_model_path`, as shown below.
 
