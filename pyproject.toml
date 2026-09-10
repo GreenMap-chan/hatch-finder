@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hatchfinder"
-version = "0.1.0"
+version = "0.1.1"
 description = "Conditional heatmap model for finding hatch patterns in drawings"
 readme = "README.md"
 requires-python = ">=3.11"
