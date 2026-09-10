@@ -49,6 +49,7 @@ class HatchEncoder(nn.Module):
                     ResidualBlock(
                         channels=out_channels,
                         num_groups=config.group_norm_groups_hatchings,
+                        kernel_size=config.kernel_size,
                     )
                 )
 

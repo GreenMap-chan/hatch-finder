@@ -9,6 +9,7 @@ class ResidualBlock(nn.Module):
         self,
         channels: int,
         num_groups: int,
+        kernel_size: int,
     ):
         super().__init__()
 
@@ -16,8 +17,8 @@ class ResidualBlock(nn.Module):
             nn.Conv2d(
                 channels,
                 channels,
-                kernel_size=3,
-                padding=1,
+                kernel_size=kernel_size,
+                padding=kernel_size // 2,
             ),
             nn.GroupNorm(
                 num_groups=num_groups,
@@ -28,8 +29,8 @@ class ResidualBlock(nn.Module):
             nn.Conv2d(
                 channels,
                 channels,
-                kernel_size=3,
-                padding=1,
+                kernel_size=kernel_size,
+                padding=kernel_size // 2,
             ),
             nn.GroupNorm(
                 num_groups=num_groups,

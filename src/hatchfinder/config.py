@@ -98,6 +98,8 @@ class ModelSettings(StrictModel):
             raise ValueError("matcher_channels values must be positive")
         if any(value < 0 for value in self.drawing_residual_blocks + self.hatch_residual_blocks):
             raise ValueError("residual block counts must be non-negative")
+        if self.kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be odd")
         if any(m > 0 and f == 0 for m, f in zip(self.match_dims, self.match_feature_dims)):
             raise ValueError("enabled matching levels must have positive match_feature_dims")
         if self.match_dims[-1] == 0:

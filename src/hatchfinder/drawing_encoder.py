@@ -41,6 +41,7 @@ class DrawingEncoder(nn.Module):
                     ResidualBlock(
                         channels=out_channels,
                         num_groups=config.group_norm_groups_drawings,
+                        kernel_size=config.kernel_size,
                     )
                 )
 
