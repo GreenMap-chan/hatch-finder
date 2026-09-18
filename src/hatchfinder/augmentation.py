@@ -202,7 +202,7 @@ class TrainingAugmentation:
         if self._happens(self.config.blur_probability):
             image = TF.gaussian_blur(
                 image,
-                kernel_size=3,
+                kernel_size=self.config.blur_kernel_size,
                 sigma=self.random.uniform(
                     self.config.blur_sigma_min,
                     self.config.blur_sigma_max,

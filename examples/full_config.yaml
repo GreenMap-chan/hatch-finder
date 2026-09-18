@@ -79,6 +79,7 @@ augmentation:
   gamma_max: 1.1
 
   blur_probability: 0.15
+  blur_kernel_size: 3
   blur_sigma_min: 0.1
   blur_sigma_max: 0.8
 

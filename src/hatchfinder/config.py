@@ -36,6 +36,7 @@ class AugmentationSettings(StrictModel):
     gamma_min: float = Field(default=0.9, gt=0.0)
     gamma_max: float = Field(default=1.1, gt=0.0)
     blur_probability: float = Field(default=0.15, ge=0.0, le=1.0)
+    blur_kernel_size: int = Field(default=3, gt=0)
     blur_sigma_min: float = Field(default=0.1, gt=0.0)
     blur_sigma_max: float = Field(default=0.8, gt=0.0)
     noise_probability: float = Field(default=0.2, ge=0.0, le=1.0)
@@ -44,6 +45,8 @@ class AugmentationSettings(StrictModel):
 
     @model_validator(mode="after")
     def validate_ranges(self) -> "AugmentationSettings":
+        if self.blur_kernel_size % 2 == 0:
+            raise ValueError("blur_kernel_size must be odd")
         ranges = (
             ("affine_scale", self.affine_scale_min, self.affine_scale_max),
             ("brightness", self.brightness_min, self.brightness_max),
