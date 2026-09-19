@@ -4,6 +4,7 @@ model:
   hatch_pool_sizes: [2, 3, 4]
   match_dims: [0, 0, 32]
   match_feature_dims: [0, 0, 8]
+  match_gate_initial_values: [0.01, 0.01, 1.0]
   matcher_channels: [32, 16]
   drawing_residual_blocks: [0, 0, 0]
   hatch_residual_blocks: [0, 0, 0]

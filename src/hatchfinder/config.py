@@ -67,6 +67,9 @@ class ModelSettings(StrictModel):
     hatch_pool_sizes: list[int] = Field(default_factory=lambda: [2, 4, 6])
     match_dims: list[int] = Field(default_factory=lambda: [64, 128, 256])
     match_feature_dims: list[int] = Field(default_factory=lambda: [8, 16, 32])
+    match_gate_initial_values: list[float] = Field(
+        default_factory=lambda: [0.01, 0.01, 1.0]
+    )
     matcher_channels: list[int] = Field(default_factory=lambda: [256, 64])
     drawing_residual_blocks: list[int] = Field(default_factory=lambda: [1, 1, 1])
     hatch_residual_blocks: list[int] = Field(default_factory=lambda: [1, 1, 1])
@@ -85,6 +88,7 @@ class ModelSettings(StrictModel):
             "hatch_channels": self.hatch_channels,
             "hatch_pool_sizes": self.hatch_pool_sizes,
             "match_feature_dims": self.match_feature_dims,
+            "match_gate_initial_values": self.match_gate_initial_values,
             "drawing_residual_blocks": self.drawing_residual_blocks,
             "hatch_residual_blocks": self.hatch_residual_blocks,
         }
