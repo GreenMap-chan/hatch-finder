@@ -346,12 +346,14 @@ class Train:
                 for grad_norm in gradient_norms
             )
             clipped_steps_percent = clipped_steps / len(gradient_norms) * 100
+            p95_grad_norm = torch.tensor(gradient_norms).quantile(0.95).item()
 
             val_loss, bce_loss, dice_loss = self.get_valid_loss(valid_loader)
 
             self.logger.log(
                 f"epoch {i + 1}/{epochs}: loss: {average_loss:.3f} | "
                 f"max_grad_norm: {max(gradient_norms):.3f} | "
+                f"p95_grad_norm: {p95_grad_norm:.3f} | "
                 f"clipped_steps: {clipped_steps}/{len(gradient_norms)} "
                 f"({clipped_steps_percent:.1f}%)"
             )
