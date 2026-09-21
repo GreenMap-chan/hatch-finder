@@ -341,10 +341,20 @@ class Train:
                     self.optimizer.zero_grad()
 
             average_loss = (epoch_loss / train_dataset_length).item()
+            clipped_steps = sum(
+                grad_norm > self.config.training.max_grad_norm
+                for grad_norm in gradient_norms
+            )
+            clipped_steps_percent = clipped_steps / len(gradient_norms) * 100
 
             val_loss, bce_loss, dice_loss = self.get_valid_loss(valid_loader)
 
-            self.logger.log(f"epoch {i + 1}/{epochs}: loss: {average_loss:.3f} | max_grad_norm: {max(gradient_norms):.3f}")
+            self.logger.log(
+                f"epoch {i + 1}/{epochs}: loss: {average_loss:.3f} | "
+                f"max_grad_norm: {max(gradient_norms):.3f} | "
+                f"clipped_steps: {clipped_steps}/{len(gradient_norms)} "
+                f"({clipped_steps_percent:.1f}%)"
+            )
             self.logger.log(f"valid_loss: {val_loss:.5f} | BCE: {bce_loss:.5f} | Dice: {dice_loss:.5f}")
 
             if val_loss < best_metric:
