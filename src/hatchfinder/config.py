@@ -60,14 +60,14 @@ class AugmentationSettings(StrictModel):
                 raise ValueError(f"{name}_min must not exceed {name}_max")
         return self
 
-class TransformerSettings(BaseModel):
-    level: int
-    num_heads: int = 8
-    num_blocks: int = 1
-    downsample: int = 1
-    mlp_ratio: float = 4.0
-    dropout: float = 0.0
-    initial_gate: float = 0.01
+class TransformerSettings(StrictModel):
+    level: int = Field(ge=0)
+    num_heads: int = Field(default=8, gt=0)
+    num_blocks: int = Field(default=1, ge=1)
+    downsample: int = Field(default=1, ge=1)
+    mlp_ratio: float = Field(default=4.0, gt=0.0, allow_inf_nan=False)
+    dropout: float = Field(default=0.0, ge=0.0, le=1.0)
+    initial_gate: float = Field(default=0.01, allow_inf_nan=False)
 
 class ModelSettings(StrictModel):
     drawing_channels: list[int] = Field(default_factory=lambda: [32, 64, 128])
@@ -125,6 +125,21 @@ class ModelSettings(StrictModel):
             raise ValueError("drawing channels must be divisible by their GroupNorm groups")
         if any(c % self.group_norm_groups_hatchings for c in self.hatch_channels):
             raise ValueError("hatch channels must be divisible by their GroupNorm groups")
+        transformer_levels = set()
+        for transformer in self.transformers:
+            level = transformer.level
+            if level >= levels:
+                raise ValueError(f"transformer level must be smaller than {levels}")
+            if level in transformer_levels:
+                raise ValueError(f"duplicate transformer level: {level}")
+            transformer_levels.add(level)
+            channels = self.drawing_channels[level]
+            if channels % transformer.num_heads:
+                raise ValueError("transformer channels must be divisible by num_heads")
+            if channels % 4:
+                raise ValueError("transformer channels must be divisible by 4")
+            if channels * transformer.mlp_ratio < 1:
+                raise ValueError("transformer feedforward dimension must be at least 1")
         return self
 
 class TrainingSettings(StrictModel):

@@ -21,7 +21,7 @@ model:
     - level: 2
       num_heads: 8
       num_blocks: 1
-      downsample: 2
+      downsample: 4
       mlp_ratio: 4.0
       dropout: 0.0
       initial_gate: 0.01

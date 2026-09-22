@@ -12,7 +12,7 @@ from .hatch_encoder import HatchEncoder
 from .drawing_encoder import DrawingEncoder
 from .output_comparison import OutputComparison
 from .heatmap_decoder import HeatmapDecoder
-from .config import Config, PT_FORMAT_VERSION, model_config_from_pt_data
+from .config import Config, ModelSettings, PT_FORMAT_VERSION, model_config_from_pt_data
 
 class HatchFinder(nn.Module):
     def __init__(
@@ -413,9 +413,10 @@ class HatchFinder(nn.Module):
     
             checkpoint_config = checkpoint.get("config")
             if checkpoint_config is not None:
-                checkpoint_model_config = checkpoint_config.get("model")
-                current_model_config = self.config.model.model_dump(mode="json")
-                if checkpoint_model_config != current_model_config:
+                checkpoint_model_config = ModelSettings.model_validate(
+                    checkpoint_config.get("model")
+                )
+                if checkpoint_model_config != self.config.model:
                     raise ValueError(
                         "Checkpoint model configuration does not match the current config"
                     )
