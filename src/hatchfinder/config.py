@@ -60,6 +60,14 @@ class AugmentationSettings(StrictModel):
                 raise ValueError(f"{name}_min must not exceed {name}_max")
         return self
 
+class TransformerSettings(BaseModel):
+    level: int
+    num_heads: int = 8
+    num_blocks: int = 1
+    downsample: int = 1
+    mlp_ratio: float = 4.0
+    dropout: float = 0.0
+    initial_gate: float = 0.01
 
 class ModelSettings(StrictModel):
     drawing_channels: list[int] = Field(default_factory=lambda: [32, 64, 128])
@@ -77,6 +85,8 @@ class ModelSettings(StrictModel):
     group_norm_groups_hatchings: int = Field(default=8, gt=0)
     kernel_size: int = Field(default=3, gt=0)
     downsample_stride: int = Field(default=2, gt=0)
+
+    transformers: list[TransformerSettings] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_architecture(self) -> "ModelSettings":
@@ -116,7 +126,6 @@ class ModelSettings(StrictModel):
         if any(c % self.group_norm_groups_hatchings for c in self.hatch_channels):
             raise ValueError("hatch channels must be divisible by their GroupNorm groups")
         return self
-
 
 class TrainingSettings(StrictModel):
     learning_rate: float = Field(default=0.00003, gt=0.0)
