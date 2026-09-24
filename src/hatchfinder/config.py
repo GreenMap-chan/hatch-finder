@@ -179,6 +179,7 @@ class DataSettings(StrictModel):
 
 class OutputSettings(StrictModel):
     directory: Path | None = None
+    unique_run_directory: bool = True
     log_file_name: str = Field(default="log.txt", min_length=1)
 
 

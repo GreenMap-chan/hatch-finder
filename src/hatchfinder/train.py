@@ -119,6 +119,23 @@ class Train:
         if config.output.directory is None:
             raise ValueError("output_path must be specified for training")
 
+        output_directory = config.output.directory
+        if checkpoint_path is None and config.output.unique_run_directory:
+            candidate = output_directory
+            suffix = 0
+            while True:
+                try:
+                    candidate.mkdir(parents=True, exist_ok=False)
+                    break
+                except FileExistsError:
+                    if not candidate.exists():
+                        raise
+                    candidate = output_directory.with_name(f"{output_directory.name}_{suffix}")
+                    suffix += 1
+            config.output.directory = candidate
+        else:
+            output_directory.mkdir(parents=True, exist_ok=True)
+
         self.config = config
         self.lr = config.training.learning_rate
         self.output_path = config.output.directory
@@ -132,7 +149,6 @@ class Train:
         self.data_loader_generator = torch.Generator()
         self.data_loader_generator.manual_seed(self.seed)
 
-        self.output_path.mkdir(exist_ok=True, parents=True)
         save_config(config, self.output_path / "config.yaml")
 
         self.model = HatchFinder(config)

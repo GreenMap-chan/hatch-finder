@@ -24,6 +24,7 @@ data:
 
 output:
   directory: "../runs/sample"
+  unique_run_directory: true
 
 runtime:
   device: cpu

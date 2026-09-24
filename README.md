@@ -100,6 +100,12 @@ file, not to the current working directory. Training writes the resolved
 configuration, a log, `best.pt`, and `last.pt` to the configured output
 directory.
 
+By default, `output.unique_run_directory: true` creates a new run directory
+when `output.directory` already exists, adding `_0`, `_1`, and so on to the
+directory name. Set it to `false` to reuse the directory for a new training
+run. Resuming from `training.checkpoint_path` always uses the selected output
+directory without adding a suffix.
+
 Using `batch_size: 1` is strongly recommended when hatch images in the dataset
 have different dimensions. Batches containing multiple examples pad smaller
 hatch images to the largest height and width in the batch. The padding uses a

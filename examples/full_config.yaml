@@ -54,6 +54,7 @@ data:
 
 output:
   directory: "../runs/full_sample"
+  unique_run_directory: true
   log_file_name: "log.txt"
 
 runtime:

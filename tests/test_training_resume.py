@@ -12,6 +12,29 @@ from hatchfinder import Train, load_config
 
 
 class TrainingCheckpointTests(unittest.TestCase):
+    def test_new_runs_get_unique_directories_but_resume_reuses_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "run"
+            config = load_config(Path(__file__).resolve().parents[1] / "examples" / "smoke_test.yaml")
+            config.output.directory = base
+
+            first = Train(config)
+            second = Train(config)
+            third = Train(config)
+            self.assertEqual([first.output_path, second.output_path, third.output_path], [
+                base, Path(f"{base}_0"), Path(f"{base}_1"),
+            ])
+            self.assertEqual(second.config.output.directory, second.output_path)
+
+            config.output.unique_run_directory = False
+            self.assertEqual(Train(config).output_path, base)
+
+            config.output.unique_run_directory = True
+            checkpoint_path = base / "last.pt"
+            torch.save({"config": first.config.model_dump(mode="json")}, checkpoint_path)
+            config.training.checkpoint_path = checkpoint_path
+            self.assertEqual(Train(config).output_path, base)
+
     def test_best_exists_without_improvement_and_resume_extends_training(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
