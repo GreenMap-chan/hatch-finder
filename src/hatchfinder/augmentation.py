@@ -22,6 +22,7 @@ class TrainingAugmentation:
         hatch: Image.Image,
         target: Image.Image,
     ) -> tuple[Image.Image, Image.Image, Image.Image, Image.Image]:
+        # Work on owned copies; callers keep ownership of the input images.
         drawing = drawing.convert("RGB")
         search_mask = search_mask.convert("L")
         hatch = hatch.convert("RGB")

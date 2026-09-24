@@ -5,14 +5,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-from torchvision.transforms.functional import to_pil_image, to_tensor
 from pathlib import Path
 
 from .hatch_encoder import HatchEncoder
 from .drawing_encoder import DrawingEncoder
 from .output_comparison import OutputComparison
 from .heatmap_decoder import HeatmapDecoder
-from .config import Config, ModelSettings, PT_FORMAT_VERSION, model_config_from_pt_data
+from .config import Config, model_config_from_pt_data
+from . import checkpoint
+from . import inference, losses
 
 class HatchFinder(nn.Module):
     def __init__(
@@ -137,18 +138,8 @@ class HatchFinder(nn.Module):
                 f"{tuple(drawing.shape[-2:])} and {tuple(mask.shape[-2:])}"
             )
 
-    def _image_to_tensor(
-        self,
-        image: Image.Image,
-        mode: str,
-    ) -> torch.Tensor:
-        image = image.convert(mode)
-
-        tensor = to_tensor(image)
-        tensor = tensor.unsqueeze(0)
-        tensor = tensor.to(self.device)
-
-        return tensor
+    def _image_to_tensor(self, image: Image.Image, mode: str) -> torch.Tensor:
+        return inference.image_to_tensor(self, image, mode)
 
     def _get_vectors(
         self,
@@ -184,12 +175,7 @@ class HatchFinder(nn.Module):
         return drawing_vectors, hatch_vectors
 
     def convert_images_to_tensors(self, drawing: Image.Image, mask: Image.Image, hatch: Image.Image):
-        drawing_tensor = self._image_to_tensor(drawing, "RGB")
-        mask_tensor = self._image_to_tensor(mask, "L")
-        mask_tensor = (mask_tensor > 0.5).float()
-        hatch_tensor = self._image_to_tensor(hatch, "RGB")
-
-        return drawing_tensor, mask_tensor, hatch_tensor
+        return inference.convert_images_to_tensors(self, drawing, mask, hatch)
 
     def forward(self, drawing: torch.Tensor, mask: torch.Tensor, hatch: torch.Tensor,):
         self._validate_inputs(drawing, mask, hatch)
@@ -223,42 +209,7 @@ class HatchFinder(nn.Module):
         debug_path: Path | None = None,
         confidence: float | None = None,
     ):
-        self.eval()
-
-        drawing_name = drawing.stem if isinstance(drawing, Path) else "inference"
-
-        if isinstance(drawing, Path):
-            with Image.open(drawing) as image:
-                drawing = image.convert("RGB")
-        if isinstance(mask, Path):
-            with Image.open(mask) as image:
-                mask = image.convert("L")
-        if isinstance(hatch, Path):
-            with Image.open(hatch) as image:
-                hatch = image.convert("RGB")
-
-        drawing_tensor, mask_tensor, hatch_tensor = self.convert_images_to_tensors(drawing, mask, hatch)
-
-        with torch.no_grad():
-            logits_matrix = self(drawing_tensor, mask_tensor, hatch_tensor)
-            
-            heatmap = torch.sigmoid(logits_matrix)
-            heatmap = heatmap * mask_tensor
-
-        if debug_path is not None:
-            confidence = 0.5 if confidence is None else confidence
-            if not 0.0 <= confidence <= 1.0:
-                raise ValueError("confidence must be between 0 and 1")
-            self._save_inference_debug(
-                drawing_tensor,
-                mask_tensor,
-                heatmap,
-                debug_path,
-                drawing_name,
-                confidence,
-            )
-
-        return heatmap
+        return inference.infer(self, drawing, mask, hatch, debug_path, confidence)
 
     @staticmethod
     def _save_inference_debug(
@@ -269,42 +220,9 @@ class HatchFinder(nn.Module):
         drawing_name: str,
         confidence: float,
     ) -> None:
-        drawing_image = to_pil_image(drawing[0].detach().cpu()).convert("RGBA")
-        mask_cpu = mask[0].detach().cpu().clamp(0.0, 1.0)
-        heatmap_cpu = heatmap[0].detach().cpu().clamp(0.0, 1.0)
-
-        outside_mask = to_pil_image(1.0 - mask_cpu).convert("L")
-        outside_overlay = Image.new("RGBA", drawing_image.size, (0, 0, 0, 140))
-        outside_overlay.putalpha(
-            outside_mask.point(lambda value: round(value * 140 / 255))
+        inference.save_inference_debug(
+            drawing, mask, heatmap, debug_path, drawing_name, confidence
         )
-        debug_image = Image.alpha_composite(drawing_image, outside_overlay)
-
-        if confidence < 1.0:
-            confidence_alpha = (
-                (heatmap_cpu - confidence) / (1.0 - confidence)
-            ).clamp(0.0, 1.0)
-        else:
-            confidence_alpha = (heatmap_cpu >= 1.0).float()
-        confidence_alpha = confidence_alpha * mask_cpu
-        confidence_alpha = confidence_alpha * 175 + (confidence_alpha > 0).float() * 80
-
-        prediction_overlay = Image.new("RGBA", drawing_image.size, (255, 0, 0, 0))
-        prediction_overlay.putalpha(
-            to_pil_image((confidence_alpha / 255.0).clamp(0.0, 1.0)).convert("L")
-        )
-        debug_image = Image.alpha_composite(debug_image, prediction_overlay)
-
-        debug_path.mkdir(parents=True, exist_ok=True)
-        result_image = debug_image.convert("RGB")
-        result_image.save(debug_path / f"{drawing_name}_debug.png")
-
-        drawing_image.close()
-        outside_mask.close()
-        outside_overlay.close()
-        prediction_overlay.close()
-        debug_image.close()
-        result_image.close()
 
     def get_target_image_tensor(self, target: Image.Image):
         target_tensor = self._image_to_tensor(target, "L")
@@ -321,65 +239,10 @@ class HatchFinder(nn.Module):
         target_tensor: torch.Tensor,
         mask: torch.Tensor,
     ):
-        if logits.shape != target_tensor.shape or logits.shape != mask.shape:
-            raise ValueError(
-                "logits, target_tensor and mask must have identical shapes, got "
-                f"{tuple(logits.shape)}, {tuple(target_tensor.shape)} and "
-                f"{tuple(mask.shape)}"
-            )
-
-        target_tensor = target_tensor.to(logits.device, non_blocking=True)
-        mask = mask.to(logits.device, non_blocking=True)
-
-        loss_map = F.binary_cross_entropy_with_logits(
-            logits,
-            target_tensor,
-            reduction="none",
-        )
-
-        bce_loss = (loss_map * mask).sum() / mask.sum().clamp_min(1.0)
-
-        dice_loss = self._get_dice(logits, target_tensor, mask)
-
-        if dice_loss is None:
-            result_loss = bce_loss
-        else:
-            result_loss = bce_loss + dice_loss
-
-        return result_loss, bce_loss, dice_loss
+        return losses.get_loss(logits, target_tensor, mask, self._get_dice)
 
     def _get_dice(self, logits: torch.Tensor, target_tensor: torch.Tensor, mask: torch.Tensor):
-        probabilities = torch.sigmoid(logits)
-        probabilities = probabilities * mask
-        target = target_tensor * mask
-
-        target_sum = target.sum(dim=(1, 2, 3))
-
-        # В batch оставляем только примеры,
-        # где target не пустой
-        non_empty = target_sum > 0
-
-        if not non_empty.any():
-            return None
-
-        probabilities = probabilities[non_empty]
-        target = target[non_empty]
-
-        intersection = (probabilities * target).sum(dim=(1, 2, 3))
-
-        smooth = 1e-6
-
-        dice = (
-            2 * intersection + smooth
-        ) / (
-            probabilities.sum(dim=(1, 2, 3))
-            + target.sum(dim=(1, 2, 3))
-            + smooth
-        )
-
-        dice_loss = 1 - dice.mean()
-
-        return dice_loss
+        return losses.get_dice(logits, target_tensor, mask)
 
     def save_checkpoint(
         self,
@@ -390,94 +253,22 @@ class HatchFinder(nn.Module):
         patience_counter: int,
         path: Path = Path("runs/checkpoint.pt"),
     ):
-        torch.save(
-            {
-                "model_state_dict": self.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "epoch": epoch,
-                "best_metric": best_metric,
-                "patience_counter": patience_counter,
-                "config": self.config.model_dump(mode="json"),
-                "format_version": PT_FORMAT_VERSION,
-            },
-            path,
+        checkpoint.save_checkpoint(
+            self, optimizer, scheduler, epoch, best_metric, patience_counter, path
         )
 
     def load_checkpoint(self, optimizer, scheduler, path: Path) -> tuple[int, float, int]:
-            checkpoint = torch.load(
-                path,
-                map_location=self.device,
-                weights_only=True,
-            )
-    
-            checkpoint_config = checkpoint.get("config")
-            if checkpoint_config is not None:
-                checkpoint_model_config = ModelSettings.model_validate(
-                    checkpoint_config.get("model")
-                )
-                if checkpoint_model_config != self.config.model:
-                    raise ValueError(
-                        "Checkpoint model configuration does not match the current config"
-                    )
-
-            self.load_state_dict(
-                checkpoint["model_state_dict"]
-            )
-    
-            if optimizer:
-                optimizer.load_state_dict(
-                    checkpoint["optimizer_state_dict"]
-                )
-
-            if scheduler:
-                scheduler.load_state_dict(
-                    checkpoint["scheduler_state_dict"]
-                )
-    
-            start_epoch = checkpoint["epoch"] + 1
-    
-            return (
-                start_epoch,
-                checkpoint["best_metric"],
-                checkpoint["patience_counter"],
-            )
+        return checkpoint.load_checkpoint(self, optimizer, scheduler, path)
 
     def save_weights(self, path: Path):
-        torch.save(
-            {
-                "format_version": PT_FORMAT_VERSION,
-                "model_config": self.config.model.model_dump(mode="json"),
-                "model_state_dict": self.state_dict(),
-            },
-            path,
-        )
+        checkpoint.save_weights(self, path)
 
     def load_model(self, path: Path):
-        pt_data = torch.load(
-            path,
-            map_location=self.device,
-            weights_only=True,
-        )
-
-        saved_model_config = model_config_from_pt_data(pt_data)
-        if (
-            saved_model_config is not None
-            and saved_model_config != self.config.model
-        ):
-            raise ValueError(
-                "Weights model configuration does not match the current model"
-            )
-
-        self.load_state_dict(self._get_model_state_dict(pt_data))
+        checkpoint.load_model(self, path)
 
     @staticmethod
     def _get_model_state_dict(pt_data: object) -> dict[str, torch.Tensor]:
-        if isinstance(pt_data, dict) and "model_state_dict" in pt_data:
-            return pt_data["model_state_dict"]
-        if isinstance(pt_data, dict):
-            return pt_data
-        raise ValueError("The .pt file does not contain a model state_dict")
+        return checkpoint.model_state_dict(pt_data)
 
     def clip_grad_norm(self):
         gradient_norm = torch.nn.utils.clip_grad_norm_(

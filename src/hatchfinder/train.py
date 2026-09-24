@@ -30,6 +30,49 @@ class Train:
         device: Literal["auto", "cpu", "cuda"] | _Unset = UNSET,
         **training_overrides: Any,
     ) -> None:
+        config, dataset_changed = self._prepare_config(
+            config, output_path, dataset_path, device, training_overrides
+        )
+        if config.data.dataset is None:
+            raise ValueError("dataset_path must be specified for training")
+        if config.output.directory is None:
+            raise ValueError("output_path must be specified for training")
+
+        self.config = config
+        self.start_epoch = 0
+        self.checkpoint_path = config.training.checkpoint_path
+        self.dataset_changed = dataset_changed
+
+        torch.manual_seed(config.training.seed)
+        self.data_loader_generator = torch.Generator().manual_seed(config.training.seed)
+
+        self.model = HatchFinder(config)
+        self.bf16_enabled = config.training.bf16 and self.model.device.type == "cuda"
+        if self.bf16_enabled and not torch.cuda.is_bf16_supported():
+            raise RuntimeError("BF16 is enabled, but the current CUDA device does not support it")
+        self.optimizer = self.create_optimizer(
+            config.training.learning_rate, config.training.weight_decay
+        )
+        if config.training.load_model_path is not None and self.checkpoint_path is None:
+            self.model.load_model(config.training.load_model_path)
+
+        self.output_path = self._create_output_directory(
+            config.output.directory,
+            reuse=self.checkpoint_path is not None or not config.output.unique_run_directory,
+        )
+        config.output.directory = self.output_path
+        self.model.config.output.directory = self.output_path
+        save_config(config, self.output_path / "config.yaml")
+        self.logger = Logger(self.output_path, config.output.log_file_name)
+
+    @staticmethod
+    def _prepare_config(
+        config: Config | None,
+        output_path: Path | str | _Unset,
+        dataset_path: Path | str | _Unset,
+        device: Literal["auto", "cpu", "cuda"] | _Unset,
+        training_overrides: dict[str, Any],
+    ) -> tuple[Config, bool]:
         if config is None:
             config = Config()
         else:
@@ -114,61 +157,24 @@ class Train:
             if weights_model_config is not None:
                 config.model = weights_model_config
 
-        if config.data.dataset is None:
-            raise ValueError("dataset_path must be specified for training")
-        if config.output.directory is None:
-            raise ValueError("output_path must be specified for training")
+        return config, dataset_changed
 
-        output_directory = config.output.directory
-        if checkpoint_path is None and config.output.unique_run_directory:
-            candidate = output_directory
-            suffix = 0
-            while True:
-                try:
-                    candidate.mkdir(parents=True, exist_ok=False)
-                    break
-                except FileExistsError:
-                    if not candidate.exists():
-                        raise
-                    candidate = output_directory.with_name(f"{output_directory.name}_{suffix}")
-                    suffix += 1
-            config.output.directory = candidate
-        else:
-            output_directory.mkdir(parents=True, exist_ok=True)
-
-        self.config = config
-        self.lr = config.training.learning_rate
-        self.output_path = config.output.directory
-        self.transformer_blocks = []
-        self.start_epoch = 0
-        self.checkpoint_path = config.training.checkpoint_path
-        self.dataset_changed = dataset_changed
-        self.seed = config.training.seed
-
-        torch.manual_seed(self.seed)
-        self.data_loader_generator = torch.Generator()
-        self.data_loader_generator.manual_seed(self.seed)
-
-        save_config(config, self.output_path / "config.yaml")
-
-        self.model = HatchFinder(config)
-        self.logger = Logger(self.output_path, config.output.log_file_name)
-        self.bf16_enabled = (
-            config.training.bf16
-            and self.model.device.type == "cuda"
-        )
-        if self.bf16_enabled and not torch.cuda.is_bf16_supported():
-            raise RuntimeError("BF16 is enabled, but the current CUDA device does not support it")
-        self.optimizer = self.create_optimizer(
-            config.training.learning_rate,
-            config.training.weight_decay,
-        )
-
-        if (
-            config.training.load_model_path is not None
-            and self.checkpoint_path is None
-        ):
-            self.model.load_model(config.training.load_model_path)
+    @staticmethod
+    def _create_output_directory(directory: Path, *, reuse: bool) -> Path:
+        if reuse:
+            directory.mkdir(parents=True, exist_ok=True)
+            return directory
+        candidate = directory
+        suffix = 0
+        while True:
+            try:
+                candidate.mkdir(parents=True, exist_ok=False)
+                return candidate
+            except FileExistsError:
+                if not candidate.exists():
+                    raise
+                candidate = directory.with_name(f"{directory.name}_{suffix}")
+                suffix += 1
 
     def autocast_context(self):
         return torch.autocast(
@@ -224,6 +230,7 @@ class Train:
             T_max=total_steps - warmup_steps,
             eta_min=self.config.training.eta_min,
         )
+        self.cosine_scheduler = cosine
 
         if not warmup_steps:
             self.scheduler = cosine
@@ -246,22 +253,20 @@ class Train:
 
         return self.scheduler
 
-    @staticmethod
-    def extend_scheduler(scheduler, total_steps: int, warmup_steps: int) -> None:
-        cosine = (
-            scheduler if isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingLR)
-            else scheduler._schedulers[-1]
-        )
+    def extend_scheduler(self, total_steps: int, warmup_steps: int) -> None:
+        cosine = self.cosine_scheduler
         new_t_max = total_steps - warmup_steps
         if new_t_max <= cosine.T_max:
             return
         cosine.T_max = new_t_max
-        if scheduler.last_epoch >= warmup_steps:
-            rates = cosine._get_closed_form_lr()
+        if cosine.last_epoch >= 0:
+            rates = [
+                cosine.eta_min + (base_lr - cosine.eta_min)
+                * (1 + math.cos(math.pi * cosine.last_epoch / new_t_max)) / 2
+                for base_lr in cosine.base_lrs
+            ]
             for group, rate in zip(cosine.optimizer.param_groups, rates):
                 group["lr"] = rate
-            cosine._last_lr = rates
-            scheduler._last_lr = rates
 
     @staticmethod
     def get_accumulation_examples_count(
@@ -284,21 +289,10 @@ class Train:
 
         return end_example - start_example
 
-    def train(self):
-        dataset_path = self.config.data.dataset
-        epochs = self.config.training.epochs
-        gradient_accum_steps = self.config.training.gradient_accumulation_steps
-        patience = self.config.training.patience
-        metric = self.config.training.metric
-        warmup_epochs = self.config.training.warmup_epochs
+    def _create_loaders(self):
         num_workers = self.config.training.num_workers
-        batch_size = self.config.training.batch_size
-
-        self.logger.log(f"Размер модели: {self.model.get_model_size() / 1_000_000:.2f}M")
-        self.logger.log(f"BF16 autocast: {'enabled' if self.bf16_enabled else 'disabled'}")
-
         dataset_train = HatchDataset(
-            dataset_path,
+            self.config.data.dataset,
             "train",
             self.config.data,
             self.config.augmentation,
@@ -306,7 +300,7 @@ class Train:
         )
         train_loader = DataLoader(
             dataset_train,
-            batch_size=batch_size,
+            batch_size=self.config.training.batch_size,
             shuffle=True,
             num_workers=num_workers,
             persistent_workers=num_workers > 0,
@@ -315,7 +309,7 @@ class Train:
             generator=self.data_loader_generator,
         )
         dataset_valid = HatchDataset(
-            dataset_path,
+            self.config.data.dataset,
             "valid",
             self.config.data,
             self.config.augmentation,
@@ -330,36 +324,26 @@ class Train:
             collate_fn=dataset_valid.collate_fn
         )
 
-        epoch_steps = math.ceil(len(train_loader) / gradient_accum_steps)
-        total_steps = epoch_steps * epochs
-        scheduler = self.create_scheduler(total_steps, warmup_epochs * epoch_steps)
+        return train_loader, valid_loader
 
-        best_metric = None
-        patience_counter = 0
-        if self.checkpoint_path is not None:
-            self.start_epoch, best_metric, patience_counter = self.model.load_checkpoint(
-                self.optimizer,
-                scheduler,
-                self.checkpoint_path,
-            )
-            self.extend_scheduler(scheduler, total_steps, warmup_epochs * epoch_steps)
-            if self.dataset_changed:
-                best_metric = None
-                patience_counter = 0
+    def _restore_training(self, scheduler, total_steps: int, warmup_steps: int):
+        if self.checkpoint_path is None:
+            return None, 0
+        self.start_epoch, best_metric, patience_counter = self.model.load_checkpoint(
+            self.optimizer, scheduler, self.checkpoint_path
+        )
+        self.extend_scheduler(total_steps, warmup_steps)
+        if self.dataset_changed:
+            return None, 0
+        return best_metric, patience_counter
 
-        possible_metrics_names = ["val_loss"]
-        if not metric in possible_metrics_names:
-            raise ValueError(f"Некрректное значение параметра metric. Допустимые: {possible_metrics_names}")
-
-        val_loss, bce_loss, dice_loss = self.get_valid_loss(valid_loader)
+    def _ensure_best_checkpoint(self, scheduler, best_metric, val_loss: float) -> float:
         if best_metric is None:
             best_metric = val_loss
-
         best_path = self.output_path / "best.pt"
         if self.checkpoint_path is None or self.dataset_changed:
             self.model.save_checkpoint(
-                self.optimizer, scheduler, self.start_epoch - 1,
-                best_metric, 0, best_path,
+                self.optimizer, scheduler, self.start_epoch - 1, best_metric, 0, best_path
             )
         elif not best_path.exists():
             previous_best = self.checkpoint_path.parent / "best.pt"
@@ -368,59 +352,89 @@ class Train:
             else:
                 best_metric = val_loss
                 self.model.save_checkpoint(
-                    self.optimizer, scheduler, self.start_epoch - 1,
-                    best_metric, 0, best_path,
+                    self.optimizer, scheduler, self.start_epoch - 1, best_metric, 0, best_path
+                )
+        return best_metric
+
+    def _run_training_epoch(self, train_loader: DataLoader, scheduler, epoch: int, epochs: int):
+        train_dataset_length = len(train_loader.dataset)
+        train_batches_count = len(train_loader)
+        gradient_accum_steps = self.config.training.gradient_accumulation_steps
+        batch_size = self.config.training.batch_size
+
+        gradient_norms = []
+        epoch_loss = torch.zeros((), device=self.model.device)
+        self.optimizer.zero_grad()
+        for batch_num, example in enumerate(tqdm(train_loader, total=train_batches_count, desc=f"epoch {epoch+1}/{epochs}",unit="batch",)):
+            current_batch_size = example["drawing"].shape[0]
+
+            # В начале каждой группы определяем,
+            # сколько batch реально будет накоплено
+            if batch_num % gradient_accum_steps == 0:
+                accumulation_examples_count = self.get_accumulation_examples_count(
+                    batch_num=batch_num,
+                    train_batches_count=train_batches_count,
+                    batch_size=batch_size,
+                    dataset_size=train_dataset_length,
+                    gradient_accum_steps=gradient_accum_steps,
                 )
 
-        self.logger.log(f"Initials metrics - valid_loss: {val_loss:.5f} | BCE: {bce_loss:.5f} | Dice: {dice_loss:.5f}")
+            with self.autocast_context():
+                example_loss, _, _ = self.train_one_example(example)
 
-        train_dataset_length = len(dataset_train)
-        train_batches_count = len(train_loader)
+            epoch_loss += example_loss.detach() * current_batch_size
+
+            loss_for_backward = (example_loss * current_batch_size / accumulation_examples_count)
+            loss_for_backward.backward()
+
+
+            if not (batch_num + 1) % gradient_accum_steps or train_batches_count == batch_num + 1:
+                grad_norm = self.model.clip_grad_norm()
+                gradient_norms.append(grad_norm.item())
+
+                self.optimizer.step()
+                scheduler.step()
+                self.optimizer.zero_grad()
+
+        average_loss = (epoch_loss / train_dataset_length).item()
+        clipped_steps = sum(
+            grad_norm > self.config.training.max_grad_norm
+            for grad_norm in gradient_norms
+        )
+        clipped_steps_percent = clipped_steps / len(gradient_norms) * 100
+        p95_grad_norm = torch.tensor(gradient_norms).quantile(0.95).item()
+
+        return average_loss, gradient_norms, clipped_steps, clipped_steps_percent, p95_grad_norm
+
+    def train(self):
+        epochs = self.config.training.epochs
+        gradient_accum_steps = self.config.training.gradient_accumulation_steps
+        patience = self.config.training.patience
+        metric = self.config.training.metric
+        warmup_epochs = self.config.training.warmup_epochs
+        self.logger.log(f"Размер модели: {self.model.get_model_size() / 1_000_000:.2f}M")
+        self.logger.log(f"BF16 autocast: {'enabled' if self.bf16_enabled else 'disabled'}")
+
+        train_loader, valid_loader = self._create_loaders()
+
+        epoch_steps = math.ceil(len(train_loader) / gradient_accum_steps)
+        total_steps = epoch_steps * epochs
+        scheduler = self.create_scheduler(total_steps, warmup_epochs * epoch_steps)
+
+        best_metric, patience_counter = self._restore_training(
+            scheduler, total_steps, warmup_epochs * epoch_steps
+        )
+        val_loss, bce_loss, dice_loss = self.get_valid_loss(valid_loader)
+        best_metric = self._ensure_best_checkpoint(scheduler, best_metric, val_loss)
+
+        self.logger.log(f"Initials metrics - valid_loss: {val_loss:.5f} | BCE: {bce_loss:.5f} | Dice: {dice_loss:.5f}")
 
         for i in range(self.start_epoch, epochs):
             patience_counter += 1
 
-            gradient_norms = []
-            epoch_loss = torch.zeros((), device=self.model.device)
-            self.optimizer.zero_grad()
-            for batch_num, example in enumerate(tqdm(train_loader, total=train_batches_count, desc=f"epoch {i+1}/{epochs}",unit="batch",)):
-                current_batch_size = example["drawing"].shape[0]
-
-                # В начале каждой группы определяем,
-                # сколько batch реально будет накоплено
-                if batch_num % gradient_accum_steps == 0:
-                    accumulation_examples_count = self.get_accumulation_examples_count(
-                        batch_num=batch_num,
-                        train_batches_count=train_batches_count,
-                        batch_size=batch_size,
-                        dataset_size=train_dataset_length,
-                        gradient_accum_steps=gradient_accum_steps,
-                    )
-
-                with self.autocast_context():
-                    example_loss, _, _ = self.train_one_example(example)
-
-                epoch_loss += example_loss.detach() * current_batch_size
-
-                loss_for_backward = (example_loss * current_batch_size / accumulation_examples_count)
-                loss_for_backward.backward()
-
-
-                if not (batch_num + 1) % gradient_accum_steps or train_batches_count == batch_num + 1:
-                    grad_norm = self.model.clip_grad_norm()
-                    gradient_norms.append(grad_norm.item())
-
-                    self.optimizer.step()
-                    scheduler.step()
-                    self.optimizer.zero_grad()
-
-            average_loss = (epoch_loss / train_dataset_length).item()
-            clipped_steps = sum(
-                grad_norm > self.config.training.max_grad_norm
-                for grad_norm in gradient_norms
+            average_loss, gradient_norms, clipped_steps, clipped_steps_percent, p95_grad_norm = (
+                self._run_training_epoch(train_loader, scheduler, i, epochs)
             )
-            clipped_steps_percent = clipped_steps / len(gradient_norms) * 100
-            p95_grad_norm = torch.tensor(gradient_norms).quantile(0.95).item()
 
             val_loss, bce_loss, dice_loss = self.get_valid_loss(valid_loader)
 
