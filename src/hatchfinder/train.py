@@ -3,6 +3,7 @@ from .logger import Logger
 
 import torch
 import math
+import shutil
 from tqdm import tqdm
 from pathlib import Path
 from typing import Any, Literal
@@ -34,6 +35,11 @@ class Train:
         else:
             config = config.model_copy(deep=True)
 
+        epochs_specified = "epochs" in config.training.model_fields_set or "epochs" in training_overrides
+        output_specified = "directory" in config.output.model_fields_set or not isinstance(output_path, _Unset)
+        dataset_specified = "dataset" in config.data.model_fields_set or not isinstance(dataset_path, _Unset)
+        device_specified = "device" in config.runtime.model_fields_set or not isinstance(device, _Unset)
+
         if training_overrides:
             config.training = type(config.training).model_validate({
                 **config.training.model_dump(),
@@ -56,8 +62,9 @@ class Train:
             })
 
         checkpoint_path = config.training.checkpoint_path
+        dataset_changed = False
         if checkpoint_path is not None:
-            unsupported_overrides = set(training_overrides) - {"checkpoint_path"}
+            unsupported_overrides = set(training_overrides) - {"checkpoint_path", "epochs"}
             if unsupported_overrides:
                 raise ValueError(
                     "Training settings cannot be overridden when resuming: "
@@ -73,12 +80,24 @@ class Train:
             if checkpoint_config is None:
                 checkpoint_config = Config()
 
-            if not isinstance(output_path, _Unset):
-                checkpoint_config.output = config.output
-            if not isinstance(dataset_path, _Unset):
-                checkpoint_config.data = config.data
-            if not isinstance(device, _Unset):
-                checkpoint_config.runtime = config.runtime
+            if epochs_specified:
+                checkpoint_config.training = type(checkpoint_config.training).model_validate({
+                    **checkpoint_config.training.model_dump(),
+                    "epochs": config.training.epochs,
+                })
+            if output_specified:
+                checkpoint_config.output.directory = config.output.directory
+            if dataset_specified:
+                previous_dataset = checkpoint_config.data.dataset
+                new_dataset = config.data.dataset
+                dataset_changed = (
+                    previous_dataset is None
+                    or new_dataset is None
+                    or previous_dataset.resolve() != new_dataset.resolve()
+                )
+                checkpoint_config.data.dataset = config.data.dataset
+            if device_specified:
+                checkpoint_config.runtime.device = config.runtime.device
             checkpoint_config.training.checkpoint_path = checkpoint_path
             config = checkpoint_config
 
@@ -106,6 +125,7 @@ class Train:
         self.transformer_blocks = []
         self.start_epoch = 0
         self.checkpoint_path = config.training.checkpoint_path
+        self.dataset_changed = dataset_changed
         self.seed = config.training.seed
 
         torch.manual_seed(self.seed)
@@ -211,6 +231,23 @@ class Train:
         return self.scheduler
 
     @staticmethod
+    def extend_scheduler(scheduler, total_steps: int, warmup_steps: int) -> None:
+        cosine = (
+            scheduler if isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingLR)
+            else scheduler._schedulers[-1]
+        )
+        new_t_max = total_steps - warmup_steps
+        if new_t_max <= cosine.T_max:
+            return
+        cosine.T_max = new_t_max
+        if scheduler.last_epoch >= warmup_steps:
+            rates = cosine._get_closed_form_lr()
+            for group, rate in zip(cosine.optimizer.param_groups, rates):
+                group["lr"] = rate
+            cosine._last_lr = rates
+            scheduler._last_lr = rates
+
+    @staticmethod
     def get_accumulation_examples_count(
         batch_num: int,
         train_batches_count: int,
@@ -289,6 +326,10 @@ class Train:
                 scheduler,
                 self.checkpoint_path,
             )
+            self.extend_scheduler(scheduler, total_steps, warmup_epochs * epoch_steps)
+            if self.dataset_changed:
+                best_metric = None
+                patience_counter = 0
 
         possible_metrics_names = ["val_loss"]
         if not metric in possible_metrics_names:
@@ -297,6 +338,23 @@ class Train:
         val_loss, bce_loss, dice_loss = self.get_valid_loss(valid_loader)
         if best_metric is None:
             best_metric = val_loss
+
+        best_path = self.output_path / "best.pt"
+        if self.checkpoint_path is None or self.dataset_changed:
+            self.model.save_checkpoint(
+                self.optimizer, scheduler, self.start_epoch - 1,
+                best_metric, 0, best_path,
+            )
+        elif not best_path.exists():
+            previous_best = self.checkpoint_path.parent / "best.pt"
+            if previous_best.exists():
+                shutil.copy2(previous_best, best_path)
+            else:
+                best_metric = val_loss
+                self.model.save_checkpoint(
+                    self.optimizer, scheduler, self.start_epoch - 1,
+                    best_metric, 0, best_path,
+                )
 
         self.logger.log(f"Initials metrics - valid_loss: {val_loss:.5f} | BCE: {bce_loss:.5f} | Dice: {dice_loss:.5f}")
 
