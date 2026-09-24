@@ -43,7 +43,7 @@ def infer(
         drawing_tensor, mask_tensor, hatch_tensor = model.convert_images_to_tensors(
             drawing, mask, hatch
         )
-    with torch.no_grad():
+    with torch.inference_mode():
         heatmap = torch.sigmoid(model(drawing_tensor, mask_tensor, hatch_tensor))
         heatmap = heatmap * mask_tensor
 

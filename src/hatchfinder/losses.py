@@ -5,18 +5,14 @@ import torch.nn.functional as F
 def get_dice(logits: torch.Tensor, target_tensor: torch.Tensor, mask: torch.Tensor):
     probabilities = torch.sigmoid(logits) * mask
     target = target_tensor * mask
-    non_empty = target.sum(dim=(1, 2, 3)) > 0
-    if not non_empty.any():
-        return None
-
-    probabilities = probabilities[non_empty]
-    target = target[non_empty]
+    target_sum = target.sum(dim=(1, 2, 3))
+    positive = (target_sum > 0).to(probabilities.dtype)
     intersection = (probabilities * target).sum(dim=(1, 2, 3))
     smooth = 1e-6
     dice = (2 * intersection + smooth) / (
-        probabilities.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3)) + smooth
+        probabilities.sum(dim=(1, 2, 3)) + target_sum + smooth
     )
-    return 1 - dice.mean()
+    return ((1 - dice) * positive).sum() / positive.sum().clamp_min(1)
 
 
 def get_loss(
@@ -38,5 +34,5 @@ def get_loss(
     )
     bce_loss = (loss_map * mask).sum() / mask.sum().clamp_min(1.0)
     dice_loss = dice_fn(logits, target_tensor, mask)
-    result_loss = bce_loss if dice_loss is None else bce_loss + dice_loss
+    result_loss = bce_loss + dice_loss
     return result_loss, bce_loss, dice_loss

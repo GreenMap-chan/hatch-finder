@@ -390,13 +390,14 @@ class Train:
 
             if not (batch_num + 1) % gradient_accum_steps or train_batches_count == batch_num + 1:
                 grad_norm = self.model.clip_grad_norm()
-                gradient_norms.append(grad_norm.item())
+                gradient_norms.append(grad_norm.detach())
 
                 self.optimizer.step()
                 scheduler.step()
                 self.optimizer.zero_grad()
 
         average_loss = (epoch_loss / train_dataset_length).item()
+        gradient_norms = torch.stack(gradient_norms).cpu().tolist()
         clipped_steps = sum(
             grad_norm > self.config.training.max_grad_norm
             for grad_norm in gradient_norms
@@ -497,13 +498,12 @@ class Train:
                 valid_examples_count += batch_size
                 epoch_loss += example_loss.detach() * batch_size
                 epoch_bce_loss += bce_loss.detach() * batch_size
-                if not dice_loss is None:
-                    target_pixels = (
-                        example["target"] * example["search_mask"]
-                    ).sum(dim=(1, 2, 3))
-                    positive_examples = int((target_pixels > 0).sum().item())
-                    epoch_dice_loss += dice_loss.detach() * positive_examples
-                    epoch_dice_count += positive_examples
+                target_pixels = (
+                    example["target"] * example["search_mask"]
+                ).sum(dim=(1, 2, 3))
+                positive_examples = int((target_pixels > 0).sum().item())
+                epoch_dice_loss += dice_loss.detach() * positive_examples
+                epoch_dice_count += positive_examples
 
             average_loss = (epoch_loss / valid_examples_count).item()
             average_bce_loss = (epoch_bce_loss / valid_examples_count).item()
