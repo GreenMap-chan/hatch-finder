@@ -138,7 +138,10 @@ class SpatialTransformer(nn.Module):
         if self.downsample > 1:
             x = F.avg_pool2d(
                 x,
-                kernel_size=self.downsample,
+                kernel_size=(
+                    min(self.downsample, x.shape[-2]),
+                    min(self.downsample, x.shape[-1]),
+                ),
                 stride=self.downsample,
             )
 

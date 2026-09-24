@@ -45,6 +45,18 @@ class TransformerConfigTests(unittest.TestCase):
         config = ModelSettings(transformers=[{"level": 0}, {"level": 2}])
         self.assertEqual([t.level for t in config.transformers], [0, 2])
 
+    def test_hatch_transformer_settings_and_forward(self):
+        with self.assertRaisesRegex(ValidationError, "duplicate hatch transformer level"):
+            ModelSettings(hatch_transformers=[{"level": 2}, {"level": 2}])
+        with self.assertRaisesRegex(ValidationError, "hatch transformer channels"):
+            ModelSettings(hatch_transformers=[{"level": 2, "num_heads": 3}])
+        config = ModelSettings(hatch_transformers=[{"level": 2, "downsample": 2}])
+        from hatchfinder.hatch_encoder import HatchEncoder
+        features = HatchEncoder(config)(torch.rand(1, 3, 24, 40))
+        self.assertEqual([tuple(x.shape[-2:]) for x in features], [(24, 40), (12, 20), (6, 10)])
+        tiny = HatchEncoder(config)(torch.rand(1, 3, 3, 5))
+        self.assertEqual(tuple(tiny[-1].shape[-2:]), (1, 2))
+
 
 class CheckpointCompatibilityTests(unittest.TestCase):
     def setUp(self):
@@ -70,6 +82,7 @@ class CheckpointCompatibilityTests(unittest.TestCase):
     def test_old_checkpoint_without_transformers_resumes(self):
         config = self.model.config.model.model_dump(mode="json")
         del config["transformers"]
+        del config["hatch_transformers"]
         with self.checkpoint_buffer(config) as buffer:
             result = self.model.load_checkpoint(None, None, buffer)
         self.assertEqual(result, (5, 0.25, 2))

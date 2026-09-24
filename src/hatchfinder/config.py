@@ -87,6 +87,7 @@ class ModelSettings(StrictModel):
     downsample_stride: int = Field(default=2, gt=0)
 
     transformers: list[TransformerSettings] = Field(default_factory=list)
+    hatch_transformers: list[TransformerSettings] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_architecture(self) -> "ModelSettings":
@@ -125,21 +126,25 @@ class ModelSettings(StrictModel):
             raise ValueError("drawing channels must be divisible by their GroupNorm groups")
         if any(c % self.group_norm_groups_hatchings for c in self.hatch_channels):
             raise ValueError("hatch channels must be divisible by their GroupNorm groups")
-        transformer_levels = set()
-        for transformer in self.transformers:
-            level = transformer.level
-            if level >= levels:
-                raise ValueError(f"transformer level must be smaller than {levels}")
-            if level in transformer_levels:
-                raise ValueError(f"duplicate transformer level: {level}")
-            transformer_levels.add(level)
-            channels = self.drawing_channels[level]
-            if channels % transformer.num_heads:
-                raise ValueError("transformer channels must be divisible by num_heads")
-            if channels % 4:
-                raise ValueError("transformer channels must be divisible by 4")
-            if channels * transformer.mlp_ratio < 1:
-                raise ValueError("transformer feedforward dimension must be at least 1")
+        for name, transformers, encoder_channels in (
+            ("transformer", self.transformers, self.drawing_channels),
+            ("hatch transformer", self.hatch_transformers, self.hatch_channels),
+        ):
+            transformer_levels = set()
+            for transformer in transformers:
+                level = transformer.level
+                if level >= levels:
+                    raise ValueError(f"{name} level must be smaller than {levels}")
+                if level in transformer_levels:
+                    raise ValueError(f"duplicate {name} level: {level}")
+                transformer_levels.add(level)
+                channels = encoder_channels[level]
+                if channels % transformer.num_heads:
+                    raise ValueError(f"{name} channels must be divisible by num_heads")
+                if channels % 4:
+                    raise ValueError(f"{name} channels must be divisible by 4")
+                if channels * transformer.mlp_ratio < 1:
+                    raise ValueError(f"{name} feedforward dimension must be at least 1")
         return self
 
 class TrainingSettings(StrictModel):
