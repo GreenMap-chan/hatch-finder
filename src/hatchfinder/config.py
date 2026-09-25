@@ -150,6 +150,9 @@ class ModelSettings(StrictModel):
 class TrainingSettings(StrictModel):
     learning_rate: float = Field(default=0.00003, gt=0.0)
     weight_decay: float = Field(default=0.01, ge=0.0)
+    loss: Literal["bce_dice", "bce_tversky"] = "bce_dice"
+    tversky_fp_weight: float = Field(default=0.3, ge=0.0, le=1.0)
+    tversky_fn_weight: float = Field(default=0.7, ge=0.0, le=1.0)
     epochs: int = Field(default=150, gt=0)
     batch_size: int = Field(default=1, gt=0)
     gradient_accumulation_steps: int = Field(default=16, gt=0)
@@ -167,6 +170,8 @@ class TrainingSettings(StrictModel):
 
     @model_validator(mode="after")
     def validate_training(self) -> "TrainingSettings":
+        if abs(self.tversky_fp_weight + self.tversky_fn_weight - 1.0) > 1e-6:
+            raise ValueError("tversky_fp_weight and tversky_fn_weight must sum to 1")
         if self.warmup_epochs >= self.epochs:
             raise ValueError("warmup_epochs must be smaller than epochs")
         if self.eta_min > self.learning_rate:

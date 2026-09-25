@@ -38,6 +38,9 @@ model:
 training:
   learning_rate: 0.00003
   weight_decay: 0.01
+  # Optional loss for experiments: bce_tversky.
+  # tversky_fp_weight: 0.3
+  # tversky_fn_weight: 0.7
   epochs: 150
 
   batch_size: 1

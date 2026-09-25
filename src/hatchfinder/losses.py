@@ -15,6 +15,27 @@ def get_dice(logits: torch.Tensor, target_tensor: torch.Tensor, mask: torch.Tens
     return ((1 - dice) * positive).sum() / positive.sum().clamp_min(1)
 
 
+def get_tversky(
+    logits: torch.Tensor,
+    target_tensor: torch.Tensor,
+    mask: torch.Tensor,
+    fp_weight: float = 0.3,
+    fn_weight: float = 0.7,
+):
+    probabilities = torch.sigmoid(logits) * mask
+    target = target_tensor * mask
+    dims = (1, 2, 3)
+    true_positive = (probabilities * target).sum(dim=dims)
+    false_positive = (probabilities * (mask - target)).sum(dim=dims)
+    false_negative = ((1 - probabilities) * target).sum(dim=dims)
+    positive = (target.sum(dim=dims) > 0).to(probabilities.dtype)
+    score = (true_positive + 1e-6) / (
+        true_positive + fp_weight * false_positive
+        + fn_weight * false_negative + 1e-6
+    )
+    return ((1 - score) * positive).sum() / positive.sum().clamp_min(1)
+
+
 def get_loss(
     logits: torch.Tensor,
     target_tensor: torch.Tensor,

@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from .config import Config, config_from_pt_data, model_config_from_pt_data, save_config
 from .hatch_dataset import HatchDataset
+from . import losses
 from torch.utils.data import DataLoader
 
 
@@ -518,4 +519,20 @@ class Train:
         return average_loss, average_bce_loss, average_dice_loss
 
     def train_one_example(self, example: dict[str, torch.Tensor]):
-        return self.model.get_example_loss(example["drawing"], example["search_mask"], example["hatch"], example["target"])
+        if self.config.training.loss == "bce_dice":
+            return self.model.get_example_loss(
+                example["drawing"], example["search_mask"],
+                example["hatch"], example["target"],
+            )
+
+        logits = self.model(example["drawing"], example["search_mask"], example["hatch"])
+        return losses.get_loss(
+            logits,
+            example["target"],
+            example["search_mask"],
+            dice_fn=lambda outputs, targets, mask: losses.get_tversky(
+                outputs, targets, mask,
+                fp_weight=self.config.training.tversky_fp_weight,
+                fn_weight=self.config.training.tversky_fn_weight,
+            ),
+        )

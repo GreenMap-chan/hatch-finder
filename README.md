@@ -106,6 +106,13 @@ directory name. Set it to `false` to reuse the directory for a new training
 run. Resuming from `training.checkpoint_path` always uses the selected output
 directory without adding a suffix.
 
+Training uses BCE + soft Dice by default. To train with BCE + Tversky instead,
+set `training.loss: bce_tversky`; `training.tversky_fp_weight` and
+`training.tversky_fn_weight` default to `0.3` and `0.7` and must sum to one.
+Validation and checkpoint selection continue to use BCE + soft Dice, so their
+reported values remain comparable across training-loss choices. Existing
+checkpoints without `training.loss` continue to use BCE + Dice.
+
 Using `batch_size: 1` is strongly recommended when hatch images in the dataset
 have different dimensions. Batches containing multiple examples pad smaller
 hatch images to the largest height and width in the batch. The padding uses a
