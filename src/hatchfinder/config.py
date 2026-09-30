@@ -164,9 +164,16 @@ class TrainingSettings(StrictModel):
     seed: int = 42
     bf16: bool = True
     eta_min: float = Field(default=1e-6, ge=0.0)
-    decay_parameters: list[str] = Field(default_factory=lambda: [".weight"])
     load_model_path: Path | None = None
     checkpoint_path: Path | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_decay_parameters(cls, data: object) -> object:
+        # Accept old configs, but no longer expose or use name-based filtering.
+        if isinstance(data, dict) and "decay_parameters" in data:
+            return {key: value for key, value in data.items() if key != "decay_parameters"}
+        return data
 
     @model_validator(mode="after")
     def validate_training(self) -> "TrainingSettings":
@@ -176,8 +183,6 @@ class TrainingSettings(StrictModel):
             raise ValueError("warmup_epochs must be smaller than epochs")
         if self.eta_min > self.learning_rate:
             raise ValueError("eta_min must not exceed learning_rate")
-        if not self.decay_parameters:
-            raise ValueError("decay_parameters must not be empty")
         return self
 
 

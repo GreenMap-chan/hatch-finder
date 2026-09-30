@@ -55,7 +55,6 @@ training:
   seed: 42
   bf16: true
   eta_min: 0.000001
-  decay_parameters: [".weight"]
   load_model_path: null
   checkpoint_path: null
 

@@ -191,25 +191,15 @@ class Train:
     ):
         decay_parameters = []
         no_decay_parameters = []
-        named_parametrs = list(self.model.named_parameters())
-
-        for decay_parametr in self.config.training.decay_parameters:
-            removed = True
-            added = False
-            while removed:
-                removed = False
-                for item in named_parametrs:
-                    name, param = item
-                    if decay_parametr in name:
-                        decay_parameters.append(param)
-                        named_parametrs.remove(item)
-                        removed = True
-                        added = True
-                        break
-            if not added:
-                raise(ValueError(f"Матрица {decay_parametr} не найдена"))
-
-        no_decay_parameters = [m for _, m in named_parametrs]
+        for param in self.model.parameters():
+            if not param.requires_grad:
+                continue
+            # Decay matrices and convolution kernels, including attention Q/K/V.
+            # Normalization scales, biases and scalar gates remain unregularized.
+            if param.ndim >= 2:
+                decay_parameters.append(param)
+            else:
+                no_decay_parameters.append(param)
 
         return torch.optim.AdamW(
             [
