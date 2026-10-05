@@ -6,7 +6,7 @@ import torch
 from pydantic import ValidationError
 
 from hatchfinder import HatchFinder, Train, load_config, PixelCorrelationSettings
-from hatchfinder.pixel_correlation import PixelCorrelation
+from hatchfinder.pixel_correlation import PixelCorrelation, _rectangular_max_pool2d
 from hatchfinder.config import TrainingSettings
 
 
@@ -15,6 +15,25 @@ class PixelCorrelationTests(unittest.TestCase):
         config = load_config(Path(__file__).resolve().parents[1] / 'examples/smoke_test.yaml')
         config.model.pixel_correlation = PixelCorrelationSettings(enabled=True, hidden_channels=width)
         return config
+
+    def test_rectangular_pool_matches_reference_values_and_gradients(self):
+        torch.manual_seed(12)
+        for height, width in [(1, 1), (7, 11), (12, 8), (256, 384)]:
+            for constant in [None, 0.0, -1.0]:
+                with self.subTest(kernel=(height, width), constant=constant):
+                    score = torch.rand(1, 1, 17, 23) * 2 - 1
+                    if constant is not None:
+                        score.fill_(constant)
+                    score.requires_grad_()
+                    padded = torch.nn.functional.pad(
+                        score, (width//2, (width-1)//2, height//2, (height-1)//2), value=-1.0,
+                    )
+                    reference = torch.nn.functional.max_pool2d(padded, (height, width), stride=1)
+                    actual = _rectangular_max_pool2d(padded, (height, width))
+                    torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+                    old_grad = torch.autograd.grad(reference.sum(), score, retain_graph=True)[0]
+                    new_grad = torch.autograd.grad(actual.sum(), score)[0]
+                    torch.testing.assert_close(new_grad, old_grad, atol=0, rtol=0)
 
     def test_rotated_rectangles_have_correct_centers_and_regions(self):
         torch.manual_seed(71)

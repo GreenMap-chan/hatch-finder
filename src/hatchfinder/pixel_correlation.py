@@ -6,6 +6,13 @@ from torch.nn import functional as F
 from .config import PixelCorrelationSettings
 
 
+def _rectangular_max_pool2d(value: torch.Tensor, kernel_size: tuple[int, int]):
+    """Exact rectangular max filter using two cheaper one-dimensional passes."""
+    height, width = kernel_size
+    horizontal = F.max_pool2d(value, (1, width), stride=1)
+    return F.max_pool2d(horizontal, (height, 1), stride=1)
+
+
 class PixelCorrelation(nn.Module):
     def __init__(self, settings: PixelCorrelationSettings):
         super().__init__()
@@ -44,7 +51,7 @@ class PixelCorrelation(nn.Module):
                 scores.append(score)
                 # Inverse asymmetric padding preserves the crop extent for even sizes.
                 padded_score = F.pad(score, (width//2, (width-1)//2, height//2, (height-1)//2), value=-1.0)
-                regions.append(F.max_pool2d(padded_score, (height, width), stride=1))
+                regions.append(_rectangular_max_pool2d(padded_score, (height, width)))
             return torch.stack(scores).amax(0), torch.stack(regions).amax(0)
 
     def forward(self, drawing, hatch, logits):
