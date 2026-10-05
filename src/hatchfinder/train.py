@@ -39,6 +39,8 @@ class Train:
         if config.output.directory is None:
             raise ValueError("output_path must be specified for training")
 
+        if config.model.pixel_correlation.enabled and config.training.batch_size != 1:
+            raise ValueError("Pixel correlation requires batch_size=1; use gradient accumulation")
         self.config = config
         self.start_epoch = 0
         self.checkpoint_path = config.training.checkpoint_path
@@ -189,31 +191,23 @@ class Train:
         lr: float,
         weight_decay: float = 0.01,
     ):
-        decay_parameters = []
-        no_decay_parameters = []
+        branch = getattr(self.model, "pixel_correlation", None)
+        branch_ids = {id(p) for p in branch.parameters()} if branch is not None else set()
+        multiplier = self.model.config.training.pixel_correlation_lr_multiplier if branch is not None else 1.0
+        groups = [
+            {"params": [], "weight_decay": weight_decay, "lr": lr},
+            {"params": [], "weight_decay": 0.0, "lr": lr},
+        ]
+        if branch is not None:
+            groups.extend([
+                {"params": [], "weight_decay": weight_decay, "lr": lr * multiplier},
+                {"params": [], "weight_decay": 0.0, "lr": lr * multiplier},
+            ])
         for param in self.model.parameters():
-            if not param.requires_grad:
-                continue
-            # Decay matrices and convolution kernels, including attention Q/K/V.
-            # Normalization scales, biases and scalar gates remain unregularized.
-            if param.ndim >= 2:
-                decay_parameters.append(param)
-            else:
-                no_decay_parameters.append(param)
-
-        return torch.optim.AdamW(
-            [
-                {
-                    "params": decay_parameters,
-                    "weight_decay": weight_decay,
-                },
-                {
-                    "params": no_decay_parameters,
-                    "weight_decay": 0.0,
-                },
-            ],
-            lr=lr,
-        )
+            if param.requires_grad:
+                index = (2 if id(param) in branch_ids else 0) + (0 if param.ndim >= 2 else 1)
+                groups[index]["params"].append(param)
+        return torch.optim.AdamW(groups, lr=lr)
 
     def create_scheduler(self, total_steps: int, warmup_steps):
         cosine = torch.optim.lr_scheduler.CosineAnnealingLR(

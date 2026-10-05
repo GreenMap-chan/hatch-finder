@@ -11,6 +11,7 @@ from .hatch_encoder import HatchEncoder
 from .drawing_encoder import DrawingEncoder
 from .output_comparison import OutputComparison
 from .heatmap_decoder import HeatmapDecoder
+from .pixel_correlation import PixelCorrelation
 from .config import Config, model_config_from_pt_data
 from . import checkpoint
 from . import inference, losses
@@ -91,6 +92,10 @@ class HatchFinder(nn.Module):
             if match_dim > 0
         })
 
+        self.pixel_correlation = (
+            PixelCorrelation(model_config.pixel_correlation)
+            if model_config.pixel_correlation.enabled else None
+        )
         self.to(config.runtime.resolve_device())
 
         if pt_data is not None:
@@ -180,6 +185,9 @@ class HatchFinder(nn.Module):
     def forward(self, drawing: torch.Tensor, mask: torch.Tensor, hatch: torch.Tensor,):
         self._validate_inputs(drawing, mask, hatch)
 
+        if self.pixel_correlation is not None and drawing.shape[0] != 1:
+            raise ValueError("Pixel correlation requires batch_size=1; use gradient accumulation")
+
         device = self.device
         drawing = drawing.to(device, non_blocking=True)
         mask = mask.to(device, non_blocking=True)
@@ -199,6 +207,8 @@ class HatchFinder(nn.Module):
             hatch_vectors
         )
 
+        if self.pixel_correlation is not None:
+            logits = logits + self.pixel_correlation(drawing, hatch, logits)
         return logits
 
     def infer(

@@ -1,4 +1,8 @@
 model:
+  pixel_correlation:
+    enabled: false
+    hidden_channels: 16
+    downsample: 4
   drawing_channels: [32, 64, 128]
   hatch_channels: [32, 64, 128]
   hatch_pool_sizes: [2, 4, 6]
@@ -36,6 +40,7 @@ model:
       initial_gate: 0.5
 
 training:
+  pixel_correlation_lr_multiplier: 1.0
   learning_rate: 0.00003
   weight_decay: 0.01
   # Optional loss for experiments: bce_tversky.

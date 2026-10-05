@@ -69,7 +69,14 @@ class TransformerSettings(StrictModel):
     dropout: float = Field(default=0.0, ge=0.0, le=1.0)
     initial_gate: float = Field(default=0.01, allow_inf_nan=False)
 
+class PixelCorrelationSettings(StrictModel):
+    enabled: bool = False
+    hidden_channels: int = Field(default=16, gt=0)
+    downsample: int = Field(default=4, gt=0)
+
+
 class ModelSettings(StrictModel):
+    pixel_correlation: PixelCorrelationSettings = Field(default_factory=PixelCorrelationSettings)
     drawing_channels: list[int] = Field(default_factory=lambda: [32, 64, 128])
     hatch_channels: list[int] = Field(default_factory=lambda: [32, 64, 128])
     hatch_pool_sizes: list[int] = Field(default_factory=lambda: [2, 4, 6])
@@ -148,6 +155,7 @@ class ModelSettings(StrictModel):
         return self
 
 class TrainingSettings(StrictModel):
+    pixel_correlation_lr_multiplier: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
     learning_rate: float = Field(default=0.00003, gt=0.0)
     weight_decay: float = Field(default=0.01, ge=0.0)
     loss: Literal["bce_dice", "bce_tversky"] = "bce_dice"
@@ -183,6 +191,8 @@ class TrainingSettings(StrictModel):
             raise ValueError("warmup_epochs must be smaller than epochs")
         if self.eta_min > self.learning_rate:
             raise ValueError("eta_min must not exceed learning_rate")
+        if self.eta_min > self.learning_rate * self.pixel_correlation_lr_multiplier:
+            raise ValueError("eta_min must not exceed the correlation branch initial learning rate")
         return self
 
 
