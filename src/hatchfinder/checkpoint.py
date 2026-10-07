@@ -70,8 +70,16 @@ def save_weights(model, path: Path):
 def load_model(model, path: Path):
     data = torch.load(path, map_location=model.device, weights_only=True)
     saved_model = model_config_from_pt_data(data)
-    if saved_model is not None and saved_model != model.config.model:
-        raise ValueError("Weights model configuration does not match the current model")
+    if saved_model is not None:
+        # Dropout can change for fine-tuning without changing the saved weights.
+        exclude_dropout = {
+            "transformers": {"__all__": {"dropout"}},
+            "hatch_transformers": {"__all__": {"dropout"}},
+        }
+        if saved_model.model_dump(exclude=exclude_dropout) != model.config.model.model_dump(
+            exclude=exclude_dropout
+        ):
+            raise ValueError("Weights model configuration does not match the current model")
     model.load_state_dict(model._get_model_state_dict(data))
 
 

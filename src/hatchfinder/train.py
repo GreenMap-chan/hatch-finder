@@ -158,6 +158,20 @@ class Train:
             )
             weights_model_config = model_config_from_pt_data(weights)
             if weights_model_config is not None:
+                for field in ("transformers", "hatch_transformers"):
+                    saved_by_level = {
+                        settings.level: settings
+                        for settings in getattr(weights_model_config, field)
+                    }
+                    for settings in getattr(config.model, field):
+                        if "dropout" not in settings.model_fields_set:
+                            continue
+                        if settings.level not in saved_by_level:
+                            raise ValueError(
+                                f"Cannot override {field} dropout at level {settings.level}: "
+                                "the loaded model has no transformer at this level"
+                            )
+                        saved_by_level[settings.level].dropout = settings.dropout
                 config.model = weights_model_config
 
         return config, dataset_changed
