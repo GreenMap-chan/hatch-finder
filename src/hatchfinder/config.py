@@ -96,6 +96,19 @@ class ModelSettings(StrictModel):
     transformers: list[TransformerSettings] = Field(default_factory=list)
     hatch_transformers: list[TransformerSettings] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def supply_legacy_match_gate_defaults(cls, data: object) -> object:
+        # Older configs omit gate initialization values
+        if isinstance(data, dict) and "match_gate_initial_values" not in data:
+            match_dims = data.get("match_dims")
+            if isinstance(match_dims, (list, tuple)) and match_dims:
+                return {
+                    **data,
+                    "match_gate_initial_values": [0.01] * (len(match_dims) - 1) + [1.0],
+                }
+        return data
+
     @model_validator(mode="after")
     def validate_architecture(self) -> "ModelSettings":
         levels = len(self.match_dims)
