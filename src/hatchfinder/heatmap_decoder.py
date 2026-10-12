@@ -19,10 +19,9 @@ class HeatmapDecoder(nn.Module):
         )
 
         self.blocks = nn.ModuleList()
-        deepest_level = len(config.match_dims) - 1
         self.match_gates = nn.ParameterDict({
             str(level): nn.Parameter(torch.tensor(
-                1.0 if level == deepest_level else 0.01,
+                config.match_gate_initial_values[level],
             ))
             for level, match_dim in enumerate(config.match_dims)
             if match_dim > 0

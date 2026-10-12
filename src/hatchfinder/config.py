@@ -60,13 +60,31 @@ class AugmentationSettings(StrictModel):
                 raise ValueError(f"{name}_min must not exceed {name}_max")
         return self
 
+class TransformerSettings(StrictModel):
+    level: int = Field(ge=0)
+    num_heads: int = Field(default=8, gt=0)
+    num_blocks: int = Field(default=1, ge=1)
+    downsample: int = Field(default=1, ge=1)
+    mlp_ratio: float = Field(default=4.0, gt=0.0, allow_inf_nan=False)
+    dropout: float = Field(default=0.0, ge=0.0, le=1.0)
+    initial_gate: float = Field(default=0.01, allow_inf_nan=False)
+
+class PixelCorrelationSettings(StrictModel):
+    enabled: bool = False
+    hidden_channels: int = Field(default=16, gt=0)
+    downsample: int = Field(default=4, gt=0)
+
 
 class ModelSettings(StrictModel):
+    pixel_correlation: PixelCorrelationSettings = Field(default_factory=PixelCorrelationSettings)
     drawing_channels: list[int] = Field(default_factory=lambda: [32, 64, 128])
     hatch_channels: list[int] = Field(default_factory=lambda: [32, 64, 128])
     hatch_pool_sizes: list[int] = Field(default_factory=lambda: [2, 4, 6])
     match_dims: list[int] = Field(default_factory=lambda: [64, 128, 256])
     match_feature_dims: list[int] = Field(default_factory=lambda: [8, 16, 32])
+    match_gate_initial_values: list[float] = Field(
+        default_factory=lambda: [0.01, 0.01, 1.0]
+    )
     matcher_channels: list[int] = Field(default_factory=lambda: [256, 64])
     drawing_residual_blocks: list[int] = Field(default_factory=lambda: [1, 1, 1])
     hatch_residual_blocks: list[int] = Field(default_factory=lambda: [1, 1, 1])
@@ -74,6 +92,9 @@ class ModelSettings(StrictModel):
     group_norm_groups_hatchings: int = Field(default=8, gt=0)
     kernel_size: int = Field(default=3, gt=0)
     downsample_stride: int = Field(default=2, gt=0)
+
+    transformers: list[TransformerSettings] = Field(default_factory=list)
+    hatch_transformers: list[TransformerSettings] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_architecture(self) -> "ModelSettings":
@@ -85,6 +106,7 @@ class ModelSettings(StrictModel):
             "hatch_channels": self.hatch_channels,
             "hatch_pool_sizes": self.hatch_pool_sizes,
             "match_feature_dims": self.match_feature_dims,
+            "match_gate_initial_values": self.match_gate_initial_values,
             "drawing_residual_blocks": self.drawing_residual_blocks,
             "hatch_residual_blocks": self.hatch_residual_blocks,
         }
@@ -111,12 +133,34 @@ class ModelSettings(StrictModel):
             raise ValueError("drawing channels must be divisible by their GroupNorm groups")
         if any(c % self.group_norm_groups_hatchings for c in self.hatch_channels):
             raise ValueError("hatch channels must be divisible by their GroupNorm groups")
+        for name, transformers, encoder_channels in (
+            ("transformer", self.transformers, self.drawing_channels),
+            ("hatch transformer", self.hatch_transformers, self.hatch_channels),
+        ):
+            transformer_levels = set()
+            for transformer in transformers:
+                level = transformer.level
+                if level >= levels:
+                    raise ValueError(f"{name} level must be smaller than {levels}")
+                if level in transformer_levels:
+                    raise ValueError(f"duplicate {name} level: {level}")
+                transformer_levels.add(level)
+                channels = encoder_channels[level]
+                if channels % transformer.num_heads:
+                    raise ValueError(f"{name} channels must be divisible by num_heads")
+                if channels % 4:
+                    raise ValueError(f"{name} channels must be divisible by 4")
+                if channels * transformer.mlp_ratio < 1:
+                    raise ValueError(f"{name} feedforward dimension must be at least 1")
         return self
 
-
 class TrainingSettings(StrictModel):
+    pixel_correlation_lr_multiplier: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
     learning_rate: float = Field(default=0.00003, gt=0.0)
     weight_decay: float = Field(default=0.01, ge=0.0)
+    loss: Literal["bce_dice", "bce_tversky"] = "bce_dice"
+    tversky_fp_weight: float = Field(default=0.3, ge=0.0, le=1.0)
+    tversky_fn_weight: float = Field(default=0.7, ge=0.0, le=1.0)
     epochs: int = Field(default=150, gt=0)
     batch_size: int = Field(default=1, gt=0)
     gradient_accumulation_steps: int = Field(default=16, gt=0)
@@ -128,18 +172,27 @@ class TrainingSettings(StrictModel):
     seed: int = 42
     bf16: bool = True
     eta_min: float = Field(default=1e-6, ge=0.0)
-    decay_parameters: list[str] = Field(default_factory=lambda: [".weight"])
     load_model_path: Path | None = None
     checkpoint_path: Path | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_decay_parameters(cls, data: object) -> object:
+        # Accept old configs, but no longer expose or use name-based filtering.
+        if isinstance(data, dict) and "decay_parameters" in data:
+            return {key: value for key, value in data.items() if key != "decay_parameters"}
+        return data
+
     @model_validator(mode="after")
     def validate_training(self) -> "TrainingSettings":
+        if abs(self.tversky_fp_weight + self.tversky_fn_weight - 1.0) > 1e-6:
+            raise ValueError("tversky_fp_weight and tversky_fn_weight must sum to 1")
         if self.warmup_epochs >= self.epochs:
             raise ValueError("warmup_epochs must be smaller than epochs")
         if self.eta_min > self.learning_rate:
             raise ValueError("eta_min must not exceed learning_rate")
-        if not self.decay_parameters:
-            raise ValueError("decay_parameters must not be empty")
+        if self.eta_min > self.learning_rate * self.pixel_correlation_lr_multiplier:
+            raise ValueError("eta_min must not exceed the correlation branch initial learning rate")
         return self
 
 
@@ -151,6 +204,7 @@ class DataSettings(StrictModel):
 
 class OutputSettings(StrictModel):
     directory: Path | None = None
+    unique_run_directory: bool = True
     log_file_name: str = Field(default="log.txt", min_length=1)
 
 

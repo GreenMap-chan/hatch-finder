@@ -2,6 +2,7 @@ from torch.utils.data import Dataset, get_worker_info
 from PIL import Image
 from torchvision.transforms.functional import to_tensor
 from pathlib import Path
+from contextlib import ExitStack
 import json
 import math
 import torch
@@ -54,33 +55,29 @@ class HatchDataset(Dataset):
 
     def __getitem__(self, index):
         item = self.items[index]
+        with ExitStack() as images:
+            def load(name: str, mode: str) -> Image.Image:
+                with Image.open(self.path / item[name]) as source:
+                    converted = source.convert(mode)
+                images.callback(converted.close)
+                return converted
 
-        with Image.open(self.path / item["drawing"]) as image:
-            drawing = image.convert("RGB")
-        with Image.open(self.path / item["search_mask"]) as image:
-            mask = image.convert("L")
-        with Image.open(self.path / item["hatch"]) as image:
-            hatch = image.convert("RGB")
-        with Image.open(self.path / item["target"]) as image:
-            target = image.convert("L")
+            drawing = load("drawing", "RGB")
+            mask = load("search_mask", "L")
+            hatch = load("hatch", "RGB")
+            target = load("target", "L")
 
-        if self.augment:
-            augmented = self._get_augmentation()(drawing, mask, hatch, target)
-            drawing.close()
-            mask.close()
-            hatch.close()
-            target.close()
-            drawing, mask, hatch, target = augmented
+            if self.augment:
+                drawing, mask, hatch, target = self._get_augmentation()(
+                    drawing, mask, hatch, target
+                )
+                for image in (drawing, mask, hatch, target):
+                    images.callback(image.close)
 
-        drawing_tensor = to_tensor(drawing)
-        mask_tensor = (to_tensor(mask) > 0.5).float()
-        hatch_tensor = to_tensor(hatch)
-        target_tensor = (to_tensor(target) > 0.5).float()
-
-        drawing.close()
-        mask.close()
-        hatch.close()
-        target.close()
+            drawing_tensor = to_tensor(drawing)
+            mask_tensor = (to_tensor(mask) > 0.5).float()
+            hatch_tensor = to_tensor(hatch)
+            target_tensor = (to_tensor(target) > 0.5).float()
 
         return {
             "drawing": drawing_tensor,

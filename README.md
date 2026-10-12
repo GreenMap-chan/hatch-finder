@@ -84,6 +84,33 @@ saved as `<drawing_name>_debug.png`.
 
 ## Training
 
+For training on your own dataset, use
+[`examples/recommended.yaml`](examples/recommended.yaml) as a recommended
+starting point. It includes a four-level model, pixel correlation, and four
+transformer blocks in each encoder. Tune the training settings for your data
+and hardware; this preset is not a guarantee of optimal results.
+
+The preset leaves dataset and output paths unset. Pass your own paths to
+`Train`, or set `data.dataset` and `output.directory` in a local copy of the
+YAML file. Paths passed directly to `Train` are relative to the current working
+directory.
+
+```python
+from pathlib import Path
+
+from hatchfinder import Train, load_config
+
+if __name__ == "__main__":
+    config = load_config(Path("examples/recommended.yaml"))
+    Train(
+        config,
+        dataset_path=Path("dataset"),
+        output_path=Path("runs/training"),
+    ).train()
+```
+
+For the bundled sample dataset, use `examples/full_config.yaml`:
+
 Load a YAML configuration and start training:
 
 ```python
@@ -99,6 +126,19 @@ Relative paths in a configuration file are resolved relative to that YAML
 file, not to the current working directory. Training writes the resolved
 configuration, a log, `best.pt`, and `last.pt` to the configured output
 directory.
+
+By default, `output.unique_run_directory: true` creates a new run directory
+when `output.directory` already exists, adding `_0`, `_1`, and so on to the
+directory name. Set it to `false` to reuse the directory for a new training
+run. Resuming from `training.checkpoint_path` always uses the selected output
+directory without adding a suffix.
+
+Training uses BCE + soft Dice by default. To train with BCE + Tversky instead,
+set `training.loss: bce_tversky`; `training.tversky_fp_weight` and
+`training.tversky_fn_weight` default to `0.3` and `0.7` and must sum to one.
+Validation and checkpoint selection continue to use BCE + soft Dice, so their
+reported values remain comparable across training-loss choices. Existing
+checkpoints without `training.loss` continue to use BCE + Dice.
 
 Using `batch_size: 1` is strongly recommended when hatch images in the dataset
 have different dimensions. Batches containing multiple examples pad smaller

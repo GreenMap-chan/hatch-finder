@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from .residual_block import ResidualBlock
+from .spatial_transformer import SpatialTransformer
 
 from .config import ModelSettings
 
@@ -12,6 +13,7 @@ class HatchEncoder(nn.Module):
         super().__init__()
 
         self.blocks = nn.ModuleList()
+        self.transformers = nn.ModuleDict()
 
         in_channels = 3
 
@@ -56,13 +58,26 @@ class HatchEncoder(nn.Module):
             self.blocks.append(nn.Sequential(*layers))
             in_channels = out_channels
 
+        for settings in config.hatch_transformers:
+            self.transformers[str(settings.level)] = SpatialTransformer(
+                channels=config.hatch_channels[settings.level],
+                num_heads=settings.num_heads,
+                num_blocks=settings.num_blocks,
+                downsample=settings.downsample,
+                mlp_ratio=settings.mlp_ratio,
+                dropout=settings.dropout,
+                initial_gate=settings.initial_gate,
+            )
+
     def forward(self, hatch: torch.Tensor):
         features = []
 
         x = hatch
 
-        for block in self.blocks:
+        for level, block in enumerate(self.blocks):
             x = block(x)
+            if str(level) in self.transformers:
+                x = self.transformers[str(level)](x)
             features.append(x)
 
         return features
