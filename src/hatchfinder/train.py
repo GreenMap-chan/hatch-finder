@@ -412,7 +412,7 @@ class Train:
         patience = self.config.training.patience
         metric = self.config.training.metric
         warmup_epochs = self.config.training.warmup_epochs
-        self.logger.log(f"Размер модели: {self.model.get_model_size() / 1_000_000:.2f}M")
+        self.logger.log(f"Model size: {self.model.get_model_size() / 1_000_000:.2f}M")
         self.logger.log(f"BF16 autocast: {'enabled' if self.bf16_enabled else 'disabled'}")
 
         train_loader, valid_loader = self._create_loaders()

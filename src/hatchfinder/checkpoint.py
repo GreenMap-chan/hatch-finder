@@ -95,7 +95,7 @@ def convert_checkpoint_to_model(
 
     if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
         raise ValueError(
-            f"Файл {checkpoint_path} не является чекпоинтом ожидаемого формата"
+            f"File {checkpoint_path} is not a checkpoint in the expected format"
         )
 
     config = config_from_pt_data(checkpoint)
@@ -111,7 +111,7 @@ def convert_checkpoint_to_model(
         },
         model_path,
     )
-    print(f"Модель сохранена: {model_path}")
+    print(f"Model saved: {model_path}")
 
 
 if __name__ == "__main__":

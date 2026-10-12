@@ -84,6 +84,33 @@ saved as `<drawing_name>_debug.png`.
 
 ## Training
 
+For training on your own dataset, use
+[`examples/recommended.yaml`](examples/recommended.yaml) as a recommended
+starting point. It includes a four-level model, pixel correlation, and four
+transformer blocks in each encoder. Tune the training settings for your data
+and hardware; this preset is not a guarantee of optimal results.
+
+The preset leaves dataset and output paths unset. Pass your own paths to
+`Train`, or set `data.dataset` and `output.directory` in a local copy of the
+YAML file. Paths passed directly to `Train` are relative to the current working
+directory.
+
+```python
+from pathlib import Path
+
+from hatchfinder import Train, load_config
+
+if __name__ == "__main__":
+    config = load_config(Path("examples/recommended.yaml"))
+    Train(
+        config,
+        dataset_path=Path("dataset"),
+        output_path=Path("runs/training"),
+    ).train()
+```
+
+For the bundled sample dataset, use `examples/full_config.yaml`:
+
 Load a YAML configuration and start training:
 
 ```python
