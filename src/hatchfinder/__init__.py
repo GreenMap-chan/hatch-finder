@@ -3,6 +3,7 @@ from importlib.metadata import PackageNotFoundError, version
 from .config import (
     AugmentationSettings,
     Config,
+    CrossAttentionSettings,
     DataSettings,
     ModelSettings,
     PixelCorrelationSettings,
@@ -20,6 +21,7 @@ from .checkpoint import convert_checkpoint_to_model
 __all__ = [
     "AugmentationSettings",
     "Config",
+    "CrossAttentionSettings",
     "DataSettings",
     "HatchFinder",
     "ModelSettings",

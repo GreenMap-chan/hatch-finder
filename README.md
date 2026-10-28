@@ -82,6 +82,35 @@ and binarized at `0.5`. The returned tensor contains probabilities in the
 masked area and zeros outside it. When `debug_path` is provided, an overlay is
 saved as `<drawing_name>_debug.png`.
 
+## Cross-attention matching
+
+Optional cross-attention compares drawing locations with individual pooled hatch
+tokens. Enable it for selected matching levels in your YAML configuration:
+
+```yaml
+model:
+  cross_attention:
+    - level: 2
+      num_heads: 8
+      downsample: 1
+      dropout: 0.0
+      initial_gate: 0.01
+```
+
+Levels are zero-based and must have a positive `match_dims[level]`, divisible by
+`num_heads`. The attention width is `match_dims[level]`; each head uses
+`match_dims[level] / num_heads` features. Keys and values come from the
+`hatch_pool_sizes[level]` square grid, projected per cell and augmented with
+learned positional embeddings. Queries come from projected drawing features.
+The local matcher compares queries and attended hatch context using their
+concatenation, absolute difference, and product. Its output is added to the
+existing matching map through a trainable gate initialized by `initial_gate`.
+
+`downsample` reduces only the drawing query grid; the local matching map is
+interpolated back before addition. The attention score dimensions are
+`N_drawing × hatch_pool_sizes[level]²` per head. Multiple entries enable multiple
+levels; each level may appear only once. `dropout` applies to attention weights.
+
 ## Training
 
 For training on your own dataset, use

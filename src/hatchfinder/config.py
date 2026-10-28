@@ -69,6 +69,14 @@ class TransformerSettings(StrictModel):
     dropout: float = Field(default=0.0, ge=0.0, le=1.0)
     initial_gate: float = Field(default=0.01, allow_inf_nan=False)
 
+class CrossAttentionSettings(StrictModel):
+    level: int = Field(ge=0)
+    num_heads: int = Field(default=8, gt=0)
+    downsample: int = Field(default=1, ge=1)
+    dropout: float = Field(default=0.0, ge=0.0, le=1.0)
+    initial_gate: float = Field(default=0.01, allow_inf_nan=False)
+
+
 class PixelCorrelationSettings(StrictModel):
     enabled: bool = False
     hidden_channels: int = Field(default=16, gt=0)
@@ -95,6 +103,7 @@ class ModelSettings(StrictModel):
 
     transformers: list[TransformerSettings] = Field(default_factory=list)
     hatch_transformers: list[TransformerSettings] = Field(default_factory=list)
+    cross_attention: list[CrossAttentionSettings] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -165,6 +174,18 @@ class ModelSettings(StrictModel):
                     raise ValueError(f"{name} channels must be divisible by 4")
                 if channels * transformer.mlp_ratio < 1:
                     raise ValueError(f"{name} feedforward dimension must be at least 1")
+        cross_attention_levels = set()
+        for attention in self.cross_attention:
+            level = attention.level
+            if level >= levels:
+                raise ValueError("cross_attention level must be smaller than the number of levels")
+            if level in cross_attention_levels:
+                raise ValueError(f"duplicate cross_attention level: {level}")
+            cross_attention_levels.add(level)
+            if self.match_dims[level] == 0:
+                raise ValueError("cross_attention requires an enabled matching level")
+            if self.match_dims[level] % attention.num_heads:
+                raise ValueError("cross_attention match_dim must be divisible by num_heads")
         return self
 
 class TrainingSettings(StrictModel):

@@ -75,6 +75,7 @@ def load_model(model, path: Path):
         exclude_dropout = {
             "transformers": {"__all__": {"dropout"}},
             "hatch_transformers": {"__all__": {"dropout"}},
+            "cross_attention": {"__all__": {"dropout"}},
         }
         if saved_model.model_dump(exclude=exclude_dropout) != model.config.model.model_dump(
             exclude=exclude_dropout

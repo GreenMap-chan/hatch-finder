@@ -21,6 +21,13 @@ model:
   kernel_size: 3
   downsample_stride: 2
 
+  cross_attention:
+   - level: 2
+     num_heads: 8
+     downsample: 1
+     dropout: 0.0
+     initial_gate: 0.01
+
   transformers:
     - level: 2
       num_heads: 8
