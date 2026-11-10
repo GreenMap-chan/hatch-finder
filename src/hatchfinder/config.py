@@ -189,6 +189,7 @@ class ModelSettings(StrictModel):
         return self
 
 class TrainingSettings(StrictModel):
+    load_new_model_config: bool = False
     pixel_correlation_lr_multiplier: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
     learning_rate: float = Field(default=0.00003, gt=0.0)
     weight_decay: float = Field(default=0.01, ge=0.0)
@@ -219,6 +220,8 @@ class TrainingSettings(StrictModel):
 
     @model_validator(mode="after")
     def validate_training(self) -> "TrainingSettings":
+        if self.load_new_model_config and self.load_model_path and self.checkpoint_path:
+            raise ValueError("Specify only one of load_model_path and checkpoint_path")
         if abs(self.tversky_fp_weight + self.tversky_fn_weight - 1.0) > 1e-6:
             raise ValueError("tversky_fp_weight and tversky_fn_weight must sum to 1")
         if self.warmup_epochs >= self.epochs:
@@ -261,6 +264,44 @@ class Config(StrictModel):
     augmentation: AugmentationSettings = Field(default_factory=AugmentationSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
 
+    @model_validator(mode="before")
+    @classmethod
+    def inherit_model_settings(cls, data):
+        if not isinstance(data, dict):
+            return data
+        training = data.get("training", {})
+        if isinstance(training, TrainingSettings):
+            training = training.model_dump()
+        if not isinstance(training, dict) or not training.get("load_new_model_config"):
+            return data
+        if training.get("load_model_path") and training.get("checkpoint_path"):
+            raise ValueError("Specify only one of load_model_path and checkpoint_path")
+        model = data.get("model", {})
+        if isinstance(model, ModelSettings):
+            model = model.model_dump(exclude_unset=True)
+        if not isinstance(model, dict):
+            return data  # Let the normal field validator describe malformed model data.
+        # Saved configurations are complete and must remain usable without the source file.
+        if isinstance(model, dict) and set(ModelSettings.model_fields) <= model.keys():
+            return data
+        source = training.get("load_model_path") or training.get("checkpoint_path")
+        if source:
+            saved = model_config_from_pt_data(torch.load(source, map_location="cpu", weights_only=True))
+            if saved is None:
+                raise ValueError("Architecture transfer requires a .pt file with model configuration")
+            return {**data, "model": merge_model_settings(saved, model)}
+        return data
+
+
+def merge_model_settings(saved: ModelSettings, overrides: dict) -> dict:
+    """Merge mappings recursively; lists are complete replacements."""
+    def merge(base, patch):
+        result = dict(base)
+        for key, value in patch.items():
+            result[key] = merge(result[key], value) if isinstance(value, dict) and isinstance(result.get(key), dict) else value
+        return result
+    return merge(saved.model_dump(), overrides)
+
 
 def config_from_pt_data(data: object) -> Config | None:
     if not isinstance(data, dict) or "config" not in data:
@@ -292,6 +333,10 @@ def load_config(path: Path) -> Config:
         data = yaml.safe_load(file)
     if not isinstance(data, dict):
         raise ValueError(f"Config must contain a YAML mapping: {path}")
+    if isinstance(data.get("training"), dict):
+        for name in ("load_model_path", "checkpoint_path"):
+            if data["training"].get(name) is not None:
+                data["training"][name] = _resolve_path(Path(data["training"][name]), path.parent)
     config = Config.model_validate(data)
     if config.data.dataset is not None:
         config.data.dataset = _resolve_path(config.data.dataset, path.parent)

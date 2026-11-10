@@ -69,6 +69,7 @@ training:
   eta_min: 0.000001
   load_model_path: null
   checkpoint_path: null
+  load_new_model_config: false
 
 data:
   dataset: "./sample_dataset"

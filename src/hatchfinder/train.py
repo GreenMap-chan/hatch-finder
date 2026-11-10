@@ -8,7 +8,8 @@ from tqdm import tqdm
 from pathlib import Path
 from typing import Any, Literal
 
-from .config import Config, config_from_pt_data, model_config_from_pt_data, save_config
+from .config import Config, ModelSettings, config_from_pt_data, model_config_from_pt_data, save_config, merge_model_settings
+from .architecture_transfer import transfer_weights
 from .hatch_dataset import HatchDataset
 from . import losses
 from torch.utils.data import DataLoader
@@ -43,7 +44,8 @@ class Train:
             raise ValueError("Pixel correlation requires batch_size=1; use gradient accumulation")
         self.config = config
         self.start_epoch = 0
-        self.checkpoint_path = config.training.checkpoint_path
+        transfer = config.training.load_new_model_config
+        self.checkpoint_path = None if transfer else config.training.checkpoint_path
         self.dataset_changed = dataset_changed
 
         torch.manual_seed(config.training.seed)
@@ -56,17 +58,24 @@ class Train:
         self.optimizer = self.create_optimizer(
             config.training.learning_rate, config.training.weight_decay
         )
-        if config.training.load_model_path is not None and self.checkpoint_path is None:
+        transfer_report = None
+        if transfer:
+            source = config.training.load_model_path or config.training.checkpoint_path
+            transfer_report = transfer_weights(self.model, source)
+        elif config.training.load_model_path is not None and self.checkpoint_path is None:
             self.model.load_model(config.training.load_model_path)
 
         self.output_path = self._create_output_directory(
             config.output.directory,
-            reuse=self.checkpoint_path is not None or not config.output.unique_run_directory,
+            reuse=not transfer and (self.checkpoint_path is not None or not config.output.unique_run_directory),
         )
         config.output.directory = self.output_path
         self.model.config.output.directory = self.output_path
         save_config(config, self.output_path / "config.yaml")
         self.logger = Logger(self.output_path, config.output.log_file_name)
+        if transfer_report:
+            for line in transfer_report:
+                self.logger.log(line)
 
     @staticmethod
     def _prepare_config(
@@ -109,8 +118,19 @@ class Train:
 
         checkpoint_path = config.training.checkpoint_path
         dataset_changed = False
+        if config.training.load_new_model_config:
+            source = config.training.load_model_path or checkpoint_path
+            if source is None:
+                raise ValueError("load_new_model_config requires load_model_path or checkpoint_path")
+            saved = model_config_from_pt_data(torch.load(source, map_location="cpu", weights_only=True))
+            if saved is None:
+                raise ValueError("Architecture transfer requires a .pt file with model configuration")
+            config.model = ModelSettings.model_validate(merge_model_settings(
+                saved, config.model.model_dump(exclude_unset=True),
+            ))
+            return config, False
         if checkpoint_path is not None:
-            unsupported_overrides = set(training_overrides) - {"checkpoint_path", "epochs"}
+            unsupported_overrides = set(training_overrides) - {"checkpoint_path", "epochs", "load_new_model_config"}
             if unsupported_overrides:
                 raise ValueError(
                     "Training settings cannot be overridden when resuming: "
@@ -125,6 +145,8 @@ class Train:
             checkpoint_config = config_from_pt_data(checkpoint)
             if checkpoint_config is None:
                 checkpoint_config = Config()
+            # This invocation is an ordinary resume, even if its source was an experiment.
+            checkpoint_config.training.load_new_model_config = False
 
             if epochs_specified:
                 checkpoint_config.training = type(checkpoint_config.training).model_validate({

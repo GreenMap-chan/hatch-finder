@@ -258,6 +258,55 @@ Training output is written to `runs/sample`.
 The full example configuration is available at
 [`examples/full_config.yaml`](https://github.com/GreenMap-chan/hatch-finder/blob/main/examples/full_config.yaml).
 
+## Architecture experiments with trained weights
+
+Set `training.load_new_model_config: true` to start a new experiment using either
+`load_model_path` or `checkpoint_path` as the weight source (specify only one).
+The source must include its model configuration; bare state dictionaries are not
+supported in this mode. Paths in YAML are relative to that YAML file.
+
+```yaml
+training:
+  checkpoint_path: ../runs/baseline/best.pt
+  load_new_model_config: true
+  learning_rate: 0.00003
+  epochs: 30
+model:
+  pixel_correlation:
+    enabled: true
+data:
+  dataset: ./sample_dataset
+output:
+  directory: ../runs/correlation_experiment
+```
+
+Omitted `model` fields inherit the source settings. Nested mappings merge by
+field, while lists replace the complete source list: `transformers: []` removes
+all drawing transformers. Omitted fields inside newly supplied list entries use
+their standard defaults. Changes are validated after merging; when changing the
+number of levels, update all corresponding per-level lists and attention levels.
+Training, data, runtime and output settings come from the current configuration.
+
+Compatible layers retain their trained weights; new or incompatible layers keep
+their normal initialization, including biases. Decoder blocks are matched by
+encoder level, and matcher output layers are matched separately from hidden
+layers. Changing attention head counts resets the affected attention, including
+its output projection. Changing stride, downsample or dropout retains compatible
+weights. Existing learned gates are retained; `initial_gate` applies to new
+branches. A new transformer or cross-attention branch can use `initial_gate: 0.0`
+to initially preserve the original predictions. Adding blocks inside an existing
+transformer does not provide that guarantee.
+
+The run prints and logs the configuration differences, transferred/initialized
+layers, unused source layers, and transferred parameter count. Optimizer,
+scheduler, epoch count and early stopping start fresh. A unique output directory
+is always used, even when `unique_run_directory` is false. The resolved config
+records the source path, and new checkpoints contain the full resulting model
+configuration, so inference and ordinary resume do not require the source file.
+To resume this experiment normally, pass its new checkpoint with
+`load_new_model_config: false`. The default `false` preserves ordinary loading
+and resume behavior. Initial validation runs before training as usual.
+
 ## License
 
 Licensed under the Apache License 2.0. See
