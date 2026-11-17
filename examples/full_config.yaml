@@ -106,7 +106,7 @@ augmentation:
   resize_scale_min: 0.5
   resize_scale_max: 1.5
   resize_min_side: 1
-  resize_interpolation: nearest  # nearest, bilinear, bicubic, lanczos
+  resize_interpolation: nearest  # nearest, bilinear, bicubic, lanczos, random
 
   brightness_probability: 0.3
   brightness_min: 0.9

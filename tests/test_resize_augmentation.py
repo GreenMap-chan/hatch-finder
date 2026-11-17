@@ -99,6 +99,67 @@ class ResizeAugmentationTests(unittest.TestCase):
         ), self.inputs())
         self.assertEqual([im.size for im in result], [(48, 32)] * 4)
 
+    def test_random_interpolation_shares_filter_and_keeps_masks_nearest(self):
+        inputs = self.inputs()
+        config = self.config(resize_probability=1, resize_scale_min=1.5,
+                             resize_scale_max=1.5, resize_interpolation="random")
+        aug = TrainingAugmentation(config)
+        for name in ("nearest", "bilinear", "bicubic", "lanczos"):
+            with self.subTest(filter=name), patch.object(aug.random, "choice", return_value=name) as choice:
+                result = aug(*inputs)
+                choice.assert_called_once_with(("nearest", "bilinear", "bicubic", "lanczos"))
+                for i, image in enumerate(result):
+                    self.addCleanup(image.close)
+                    mode = getattr(Image.Resampling, name.upper()) if i in (0, 2) else Image.Resampling.NEAREST
+                    with inputs[i].resize((36, 24), mode) as expected:
+                        np.testing.assert_array_equal(np.array(image), np.array(expected))
+
+    def test_random_interpolation_branch_override_selects_independent_filters(self):
+        inputs = self.inputs()
+        config = self.config(resize_probability=1, resize_scale_min=1.5,
+                             resize_scale_max=1.5, resize_interpolation="random",
+                             hatch={"resize_interpolation": "random"})
+        config = Config.model_validate_json(Config(augmentation=config).model_dump_json()).augmentation
+        self.assertEqual(config.for_branch("hatch").resize_interpolation, "random")
+        aug = TrainingAugmentation(config)
+        with patch.object(aug.random, "choice", side_effect=["nearest", "bicubic"]) as choice:
+            result = aug(*inputs)
+            self.assertEqual(choice.call_count, 2)
+        for image in result:
+            self.addCleanup(image.close)
+        for i, mode in ((0, Image.Resampling.NEAREST), (2, Image.Resampling.BICUBIC)):
+            with inputs[i].resize((36, 24), mode) as expected:
+                np.testing.assert_array_equal(np.array(result[i]), np.array(expected))
+
+    def test_random_interpolation_is_reproducible_and_covers_all_filters(self):
+        config = self.config(resize_probability=1, resize_scale_min=1.5,
+                             resize_scale_max=1.5, resize_interpolation="random")
+        left, right = TrainingAugmentation(config), TrainingAugmentation(config)
+        inputs = self.inputs()
+        seen = set()
+        with patch.object(left.random, "choice", wraps=left.random.choice) as choice:
+            for _ in range(24):
+                a, b = left(*inputs), right(*inputs)
+                for x, y in zip(a, b):
+                    self.addCleanup(x.close)
+                    self.addCleanup(y.close)
+                    np.testing.assert_array_equal(np.array(x), np.array(y))
+                seen.add(a[0].tobytes())
+            self.assertEqual(choice.call_count, 24)
+        self.assertEqual(len(seen), 4)
+
+    def test_skipped_random_resize_does_not_choose_filter(self):
+        for overrides in ({"resize_probability": 0}, {"resize_min_side": 100}):
+            config = self.config(resize_probability=1, resize_scale_max=2,
+                                 resize_interpolation="random")
+            config = config.model_copy(update=overrides)
+            aug = TrainingAugmentation(config)
+            with patch.object(aug.random, "choice", wraps=aug.random.choice) as choice:
+                result = aug(*self.inputs())
+                choice.assert_not_called()
+            for image in result:
+                self.addCleanup(image.close)
+
     def test_disabled_resize_does_not_advance_random_stream(self):
         inputs = self.inputs()
         a = TrainingAugmentation(AugmentationSettings(seed=17))

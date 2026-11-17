@@ -111,8 +111,11 @@ class TrainingAugmentation:
                 minimum_scale = max(minimum_scale, *(config.resize_min_side/min(size) for size in sizes))
             if minimum_scale > config.resize_scale_max:
                 return None
-            return {"scale": self.random.uniform(minimum_scale, config.resize_scale_max),
-                    "interpolation": config.resize_interpolation}
+            scale = self.random.uniform(minimum_scale, config.resize_scale_max)
+            interpolation = config.resize_interpolation
+            if interpolation == "random":
+                interpolation = self.random.choice(("nearest", "bilinear", "bicubic", "lanczos"))
+            return {"scale": scale, "interpolation": interpolation}
         if transform in ("brightness", "contrast", "gamma"):
             return {"factor": self.random.uniform(getattr(config, transform + "_min"),
                                                    getattr(config, transform + "_max"))}

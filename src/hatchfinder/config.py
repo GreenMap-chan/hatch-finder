@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 PT_FORMAT_VERSION = 1
-ResizeInterpolation = Literal["nearest", "bilinear", "bicubic", "lanczos"]
+ResizeInterpolation = Literal["nearest", "bilinear", "bicubic", "lanczos", "random"]
 
 
 class StrictModel(BaseModel):
