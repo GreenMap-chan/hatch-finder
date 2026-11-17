@@ -129,6 +129,10 @@ augmentation:
   noise_std_min: 0.002
   noise_std_max: 0.015
 
+  color_overlay_probability: 0.0  # Set to enable.
+  color_overlay_alpha_min: 0.02
+  color_overlay_alpha_max: 0.15
+
   drawing: null
   hatch: null
   # Example overrides (replace the null values above):

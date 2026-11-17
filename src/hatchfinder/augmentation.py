@@ -11,7 +11,7 @@ from .config import AugmentationSettings
 class TrainingAugmentation:
     TRANSFORMS = (
         "horizontal_flip", "vertical_flip", "rotate_90", "affine", "resize",
-        "brightness", "contrast", "gamma", "blur", "noise",
+        "brightness", "contrast", "gamma", "blur", "noise", "color_overlay",
     )
 
     def __init__(self, config: AugmentationSettings) -> None:
@@ -124,6 +124,10 @@ class TrainingAugmentation:
                     "sigma": self.random.uniform(config.blur_sigma_min, config.blur_sigma_max)}
         if transform == "noise":
             return {"sigma": self.random.uniform(config.noise_std_min, config.noise_std_max)}
+        if transform == "color_overlay":
+            return {"color": tuple(self.random.randint(0, 255) for _ in range(3)),
+                    "alpha": self.random.uniform(config.color_overlay_alpha_min,
+                                                 config.color_overlay_alpha_max)}
         raise ValueError(f"Unknown augmentation: {transform}")
 
     def _apply_transform(self, transform: str, images: tuple[Image.Image, ...],
@@ -165,6 +169,9 @@ class TrainingAugmentation:
             tensor = TF.to_tensor(image)
             noise = torch.randn(tensor.shape, generator=self.torch_generator, dtype=tensor.dtype)
             image = TF.to_pil_image((tensor + noise*parameters["sigma"]).clamp(0.0, 1.0))
+        elif transform == "color_overlay":
+            with Image.new("RGB", image.size, parameters["color"]) as overlay:
+                image = Image.blend(image, overlay, parameters["alpha"])
         else:
             raise ValueError(f"Unknown augmentation: {transform}")
         return (image, *images[1:])

@@ -47,6 +47,9 @@ class ImageAugmentationOverrides(StrictModel):
     noise_probability: float | None = None
     noise_std_min: float | None = None
     noise_std_max: float | None = None
+    color_overlay_probability: float | None = None
+    color_overlay_alpha_min: float | None = None
+    color_overlay_alpha_max: float | None = None
 
 
 class AugmentationSettings(StrictModel):
@@ -82,6 +85,9 @@ class AugmentationSettings(StrictModel):
     noise_probability: float = Field(default=0.2, ge=0.0, le=1.0)
     noise_std_min: float = Field(default=0.002, ge=0.0)
     noise_std_max: float = Field(default=0.015, ge=0.0)
+    color_overlay_probability: float = Field(default=0.0, ge=0.0, le=1.0)
+    color_overlay_alpha_min: float = Field(default=0.02, ge=0.0, le=1.0)
+    color_overlay_alpha_max: float = Field(default=0.15, ge=0.0, le=1.0)
     drawing: ImageAugmentationOverrides | None = None
     hatch: ImageAugmentationOverrides | None = None
 
@@ -142,6 +148,7 @@ class AugmentationSettings(StrictModel):
             ("gamma", self.gamma_min, self.gamma_max),
             ("blur_sigma", self.blur_sigma_min, self.blur_sigma_max),
             ("noise_std", self.noise_std_min, self.noise_std_max),
+            ("color_overlay_alpha", self.color_overlay_alpha_min, self.color_overlay_alpha_max),
         )
         for name, minimum, maximum in ranges:
             if minimum > maximum:

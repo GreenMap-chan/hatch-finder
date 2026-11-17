@@ -47,7 +47,7 @@ class UnifiedAugmentationTests(unittest.TestCase):
                     self.assertNotEqual(output[0].tobytes(), output[2].tobytes())
                 else:
                     np.testing.assert_array_equal(np.array(output[0]), np.array(output[2]))
-                if name in ('brightness', 'contrast', 'gamma', 'blur', 'noise'):
+                if name in ('brightness', 'contrast', 'gamma', 'blur', 'noise', 'color_overlay'):
                     for i in (1, 3):
                         np.testing.assert_array_equal(np.array(output[i]), np.array(inputs[i]))
 
@@ -70,6 +70,7 @@ class UnifiedAugmentationTests(unittest.TestCase):
             'resize': 'resize_interpolation', 'brightness': 'brightness_min',
             'contrast': 'contrast_max', 'gamma': 'gamma_min', 'blur': 'blur_kernel_size',
             'noise': 'noise_std_max',
+            'color_overlay': 'color_overlay_alpha_max',
         }
         for name, field in fields.items():
             # Even a value equal to the shared value is an explicit independent override.
@@ -150,6 +151,61 @@ class UnifiedAugmentationTests(unittest.TestCase):
         self.assertNotIn('hatch_rotate_90_probability', saved)
         self.assertEqual(AugmentationSettings.model_validate(saved), config)
         self.assertTrue(config.independent_transform('hatch', 'rotate_90'))
+
+    def test_color_overlay_is_uniform_across_different_sizes_and_preserves_masks(self):
+        config = self.config(color_overlay_probability=1, color_overlay_alpha_min=.25,
+                             color_overlay_alpha_max=.25)
+        aug = TrainingAugmentation(config)
+        inputs = self.inputs(hatch_size=(20, 8))
+        with patch.object(aug.random, 'randint', side_effect=[80, 120, 240]) as color:
+            output = self.run_aug(aug, inputs)
+            self.assertEqual(color.call_count, 3)
+        for i in (0, 2):
+            expected = np.floor(np.array(inputs[i])*.75 + np.array([80, 120, 240])*.25).astype('uint8')
+            np.testing.assert_array_equal(np.array(output[i]), expected)
+            self.assertEqual(output[i].size, inputs[i].size)
+        for i in (1, 3):
+            np.testing.assert_array_equal(np.array(output[i]), np.array(inputs[i]))
+
+    def test_color_overlay_branch_override_inherits_range_and_samples_independently(self):
+        config = self.config(color_overlay_probability=1, color_overlay_alpha_min=.25,
+                             color_overlay_alpha_max=.25, hatch={'color_overlay_probability': 1})
+        config = Config.model_validate_json(Config(augmentation=config).model_dump_json()).augmentation
+        aug = TrainingAugmentation(config)
+        inputs = self.inputs()
+        with patch.object(aug.random, 'randint', side_effect=[255, 0, 0, 0, 0, 255]):
+            output = self.run_aug(aug, inputs)
+        for i, color in ((0, [255, 0, 0]), (2, [0, 0, 255])):
+            expected = np.floor(np.array(inputs[i])*.75 + np.array(color)*.25).astype('uint8')
+            np.testing.assert_array_equal(np.array(output[i]), expected)
+
+    def test_color_overlay_seed_and_disabled_behavior(self):
+        inputs = self.inputs()
+        config = self.config(color_overlay_probability=1)
+        left, right = TrainingAugmentation(config), TrainingAugmentation(config)
+        seen = set()
+        for _ in range(5):
+            a, b = self.run_aug(left, inputs), self.run_aug(right, inputs)
+            for x, y in zip(a, b):
+                np.testing.assert_array_equal(np.array(x), np.array(y))
+            seen.add(a[0].tobytes())
+        self.assertGreater(len(seen), 1)
+        for extra in ({'color_overlay_probability': 0}, {'enabled': False},
+                      {'drawing': {'enabled': False}, 'hatch': {'enabled': False}}):
+            aug = TrainingAugmentation(self.config(**({'color_overlay_probability': 1} | extra)))
+            state = aug.random.getstate()
+            output = self.run_aug(aug, inputs)
+            self.assertEqual(state, aug.random.getstate())
+            for x, y in zip(inputs, output):
+                np.testing.assert_array_equal(np.array(x), np.array(y))
+
+    def test_invalid_color_overlay_settings_rejected(self):
+        for invalid in ({'color_overlay_probability': 1.1}, {'color_overlay_alpha_min': -.1},
+                        {'color_overlay_alpha_max': 1.1}, {'color_overlay_alpha_min': .2},
+                        {'color_overlay_alpha_max': float('nan')}):
+            for raw in (invalid, {'drawing': invalid}, {'hatch': invalid}):
+                with self.subTest(raw=raw), self.assertRaises(ValidationError):
+                    self.config(**raw)
 
     def test_conflicting_or_invalid_legacy_rotation_names_are_rejected(self):
         for raw in (
