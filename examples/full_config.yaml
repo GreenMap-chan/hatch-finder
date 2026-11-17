@@ -121,3 +121,18 @@ augmentation:
   noise_probability: 0.2
   noise_std_min: 0.002
   noise_std_max: 0.015
+
+  drawing: null
+  hatch: null
+  # Example overrides (replace the null values above):
+  # drawing:
+  #   affine_scale_min: 0.95
+  #   affine_scale_max: 1.05
+  #   noise_probability: 0.0
+  # hatch:
+  #   affine_probability: 0.8
+  #   affine_scale_min: 0.5
+  #   affine_scale_max: 1.5
+  #   rotate_90_probability: 0.75
+  #   blur_probability: 0.3
+  # Use enabled: false inside either mapping to disable that branch.

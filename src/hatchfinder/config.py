@@ -13,6 +13,36 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ImageAugmentationOverrides(StrictModel):
+    """None means inherit the shared augmentation setting."""
+
+    enabled: bool | None = None
+    horizontal_flip_probability: float | None = None
+    vertical_flip_probability: float | None = None
+    rotate_90_probability: float | None = None
+    affine_probability: float | None = None
+    affine_angle_degrees: float | None = None
+    affine_translate_percent: float | None = None
+    affine_scale_min: float | None = None
+    affine_scale_max: float | None = None
+    brightness_probability: float | None = None
+    brightness_min: float | None = None
+    brightness_max: float | None = None
+    contrast_probability: float | None = None
+    contrast_min: float | None = None
+    contrast_max: float | None = None
+    gamma_probability: float | None = None
+    gamma_min: float | None = None
+    gamma_max: float | None = None
+    blur_probability: float | None = None
+    blur_kernel_size: int | None = None
+    blur_sigma_min: float | None = None
+    blur_sigma_max: float | None = None
+    noise_probability: float | None = None
+    noise_std_min: float | None = None
+    noise_std_max: float | None = None
+
+
 class AugmentationSettings(StrictModel):
     enabled: bool = True
     seed: int = 42
@@ -42,6 +72,21 @@ class AugmentationSettings(StrictModel):
     noise_probability: float = Field(default=0.2, ge=0.0, le=1.0)
     noise_std_min: float = Field(default=0.002, ge=0.0)
     noise_std_max: float = Field(default=0.015, ge=0.0)
+    drawing: ImageAugmentationOverrides | None = None
+    hatch: ImageAugmentationOverrides | None = None
+
+    def for_branch(self, branch: Literal["drawing", "hatch"]) -> "AugmentationSettings":
+        """Resolve partial overrides, validating ranges after inheritance."""
+        data = self.model_dump(exclude={"drawing", "hatch"})
+        overrides = getattr(self, branch)
+        if overrides is not None:
+            patch = overrides.model_dump(exclude_none=True)
+            if "rotate_90_probability" in patch:
+                patch[f"{branch}_rotate_90_probability"] = patch.pop("rotate_90_probability")
+            data.update(patch)
+        # The global switch always wins, including over branch enabled: true.
+        data["enabled"] = self.enabled and data["enabled"]
+        return AugmentationSettings.model_validate(data)
 
     @model_validator(mode="after")
     def validate_ranges(self) -> "AugmentationSettings":
@@ -58,6 +103,12 @@ class AugmentationSettings(StrictModel):
         for name, minimum, maximum in ranges:
             if minimum > maximum:
                 raise ValueError(f"{name}_min must not exceed {name}_max")
+        for branch in ("drawing", "hatch"):
+            if getattr(self, branch) is not None:
+                try:
+                    self.for_branch(branch)
+                except ValueError as error:
+                    raise ValueError(f"augmentation.{branch}: {error}") from error
         return self
 
 class TransformerSettings(StrictModel):

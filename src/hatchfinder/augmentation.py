@@ -14,6 +14,9 @@ class TrainingAugmentation:
         self.random = random.Random(config.seed)
         self.torch_generator = torch.Generator(device="cpu")
         self.torch_generator.manual_seed(config.seed)
+        self.separate_branches = config.drawing is not None or config.hatch is not None
+        self.drawing_config = config.for_branch("drawing")
+        self.hatch_config = config.for_branch("hatch")
 
     def __call__(
         self,
@@ -60,6 +63,10 @@ class TrainingAugmentation:
         hatch: Image.Image,
         target: Image.Image,
     ) -> tuple[Image.Image, Image.Image, Image.Image, Image.Image]:
+        if self.separate_branches:
+            return self._augment_separate(drawing, search_mask, hatch, target)
+
+        # Preserve the legacy random draw order and synchronized flips.
         drawing = drawing.copy()
         search_mask = search_mask.copy()
         hatch = hatch.copy()
@@ -106,13 +113,60 @@ class TrainingAugmentation:
 
         return drawing, search_mask, hatch, target
 
+    def _augment_separate(
+        self,
+        drawing: Image.Image,
+        search_mask: Image.Image,
+        hatch: Image.Image,
+        target: Image.Image,
+    ) -> tuple[Image.Image, Image.Image, Image.Image, Image.Image]:
+        drawing, search_mask, hatch, target = (
+            image.copy() for image in (drawing, search_mask, hatch, target)
+        )
+        dc, hc = self.drawing_config, self.hatch_config
+        if dc.enabled:
+            if self._happens(dc.horizontal_flip_probability):
+                drawing, search_mask, target = (
+                    TF.hflip(image) for image in (drawing, search_mask, target)
+                )
+            if self._happens(dc.vertical_flip_probability):
+                drawing, search_mask, target = (
+                    TF.vflip(image) for image in (drawing, search_mask, target)
+                )
+            if self._happens(dc.drawing_rotate_90_probability):
+                angle = self.random.choice((90, 180, 270))
+                drawing = TF.rotate(drawing, angle, expand=True, fill=255)
+                search_mask = TF.rotate(search_mask, angle, expand=True, fill=0)
+                target = TF.rotate(target, angle, expand=True, fill=0)
+            if self._happens(dc.affine_probability):
+                drawing, search_mask, target = self._affine_drawing_group(
+                    drawing, search_mask, target, dc,
+                )
+            drawing = self._augment_appearance(drawing, dc)
+
+        if hc.enabled:
+            if self._happens(hc.horizontal_flip_probability):
+                hatch = TF.hflip(hatch)
+            if self._happens(hc.vertical_flip_probability):
+                hatch = TF.vflip(hatch)
+            if self._happens(hc.hatch_rotate_90_probability):
+                hatch = TF.rotate(
+                    hatch, self.random.choice((90, 180, 270)), expand=True, fill=255,
+                )
+            if self._happens(hc.affine_probability):
+                hatch = self._affine_image(hatch, hc)
+            hatch = self._augment_appearance(hatch, hc)
+
+        return drawing, search_mask, hatch, self._clip_target(target, search_mask)
+
     def _affine_drawing_group(
         self,
         drawing: Image.Image,
         search_mask: Image.Image,
         target: Image.Image,
+        config: AugmentationSettings | None = None,
     ) -> tuple[Image.Image, Image.Image, Image.Image]:
-        angle, translate, scale = self._affine_parameters(drawing.size)
+        angle, translate, scale = self._affine_parameters(drawing.size, config)
         drawing = TF.affine(
             drawing,
             angle,
@@ -142,8 +196,10 @@ class TrainingAugmentation:
         )
         return drawing, search_mask, target
 
-    def _affine_image(self, image: Image.Image) -> Image.Image:
-        angle, translate, scale = self._affine_parameters(image.size)
+    def _affine_image(
+        self, image: Image.Image, config: AugmentationSettings | None = None,
+    ) -> Image.Image:
+        angle, translate, scale = self._affine_parameters(image.size, config)
         return TF.affine(
             image,
             angle,
@@ -157,63 +213,68 @@ class TrainingAugmentation:
     def _affine_parameters(
         self,
         size: tuple[int, int],
+        config: AugmentationSettings | None = None,
     ) -> tuple[float, list[int], float]:
+        config = config if config is not None else self.config
         width, height = size
-        max_dx = round(width * self.config.affine_translate_percent)
-        max_dy = round(height * self.config.affine_translate_percent)
+        max_dx = round(width * config.affine_translate_percent)
+        max_dy = round(height * config.affine_translate_percent)
         angle = self.random.uniform(
-            -self.config.affine_angle_degrees,
-            self.config.affine_angle_degrees,
+            -config.affine_angle_degrees,
+            config.affine_angle_degrees,
         )
         translate = [
             self.random.randint(-max_dx, max_dx),
             self.random.randint(-max_dy, max_dy),
         ]
         scale = self.random.uniform(
-            self.config.affine_scale_min,
-            self.config.affine_scale_max,
+            config.affine_scale_min,
+            config.affine_scale_max,
         )
         return angle, translate, scale
 
-    def _augment_appearance(self, image: Image.Image) -> Image.Image:
-        if self._happens(self.config.brightness_probability):
+    def _augment_appearance(
+        self, image: Image.Image, config: AugmentationSettings | None = None,
+    ) -> Image.Image:
+        config = config if config is not None else self.config
+        if self._happens(config.brightness_probability):
             image = TF.adjust_brightness(
                 image,
                 self.random.uniform(
-                    self.config.brightness_min,
-                    self.config.brightness_max,
+                    config.brightness_min,
+                    config.brightness_max,
                 ),
             )
-        if self._happens(self.config.contrast_probability):
+        if self._happens(config.contrast_probability):
             image = TF.adjust_contrast(
                 image,
                 self.random.uniform(
-                    self.config.contrast_min,
-                    self.config.contrast_max,
+                    config.contrast_min,
+                    config.contrast_max,
                 ),
             )
-        if self._happens(self.config.gamma_probability):
+        if self._happens(config.gamma_probability):
             image = TF.adjust_gamma(
                 image,
                 self.random.uniform(
-                    self.config.gamma_min,
-                    self.config.gamma_max,
+                    config.gamma_min,
+                    config.gamma_max,
                 ),
             )
-        if self._happens(self.config.blur_probability):
+        if self._happens(config.blur_probability):
             image = TF.gaussian_blur(
                 image,
-                kernel_size=self.config.blur_kernel_size,
+                kernel_size=config.blur_kernel_size,
                 sigma=self.random.uniform(
-                    self.config.blur_sigma_min,
-                    self.config.blur_sigma_max,
+                    config.blur_sigma_min,
+                    config.blur_sigma_max,
                 ),
             )
-        if self._happens(self.config.noise_probability):
+        if self._happens(config.noise_probability):
             tensor = TF.to_tensor(image)
             noise_std = self.random.uniform(
-                self.config.noise_std_min,
-                self.config.noise_std_max,
+                config.noise_std_min,
+                config.noise_std_max,
             )
             noise = torch.randn(
                 tensor.shape,
