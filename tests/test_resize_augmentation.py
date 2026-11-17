@@ -17,7 +17,7 @@ class ResizeAugmentationTests(unittest.TestCase):
     def config(self, **overrides):
         values = dict(
             horizontal_flip_probability=0, vertical_flip_probability=0,
-            drawing_rotate_90_probability=0, hatch_rotate_90_probability=0,
+            rotate_90_probability=0,
             affine_probability=0, brightness_probability=0, contrast_probability=0,
             gamma_probability=0, blur_probability=0, noise_probability=0,
         )

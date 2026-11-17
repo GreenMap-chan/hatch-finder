@@ -13,7 +13,7 @@ class SeparateAugmentationTests(unittest.TestCase):
     def config(self, **overrides):
         values = dict(
             horizontal_flip_probability=0, vertical_flip_probability=0,
-            drawing_rotate_90_probability=0, hatch_rotate_90_probability=0,
+            rotate_90_probability=0,
             affine_probability=0, brightness_probability=0,
             contrast_probability=0, gamma_probability=0,
             blur_probability=0, noise_probability=0,
@@ -42,8 +42,7 @@ class SeparateAugmentationTests(unittest.TestCase):
     def test_partial_overrides_inherit_and_survive_saved_config(self):
         config = self.config(
             brightness_min=0.7, affine_scale_max=2,
-            drawing_rotate_90_probability=0.2,
-            hatch_rotate_90_probability=0.8,
+            rotate_90_probability=0.2,
             drawing={"noise_probability": 0.4},
             hatch={"affine_scale_min": 1.5, "rotate_90_probability": 0},
         )
@@ -56,8 +55,8 @@ class SeparateAugmentationTests(unittest.TestCase):
             self.assertEqual(hatch.brightness_min, 0.7)
             self.assertEqual(hatch.affine_scale_min, 1.5)
             self.assertEqual(hatch.affine_scale_max, 2)
-            self.assertEqual(drawing.drawing_rotate_90_probability, 0.2)
-            self.assertEqual(hatch.hatch_rotate_90_probability, 0)
+            self.assertEqual(drawing.rotate_90_probability, 0.2)
+            self.assertEqual(hatch.rotate_90_probability, 0)
 
     def test_invalid_branch_settings_are_rejected_after_inheritance(self):
         for branch in ("drawing", "hatch"):
@@ -142,10 +141,56 @@ class SeparateAugmentationTests(unittest.TestCase):
         originals = self.inputs()
         config = self.config(horizontal_flip_probability=1)
         config = AugmentationSettings.model_validate_json(config.model_dump_json())
-        self.assertFalse(TrainingAugmentation(config).separate_branches)
         result = self.run_aug(config, originals)
         for i in range(4):
             np.testing.assert_array_equal(result[i], np.array(originals[i])[:, ::-1])
+
+    def test_shared_flips_with_resize_blocks_and_null_overrides(self):
+        originals = self.inputs()
+        config = self.config(
+            horizontal_flip_probability=0.5, vertical_flip_probability=0.5,
+            drawing={"resize_probability": 0},
+            hatch={"resize_probability": 0, "horizontal_flip_probability": None},
+        )
+        config = Config.model_validate_json(Config(augmentation=config).model_dump_json()).augmentation
+        aug = TrainingAugmentation(config)
+        seen = set()
+        for _ in range(20):
+            result = aug(*originals)
+            for image in result:
+                self.addCleanup(image.close)
+            # These inputs have identical RGB images and target matching black pixels.
+            np.testing.assert_array_equal(np.array(result[0]), np.array(result[2]))
+            np.testing.assert_array_equal(np.array(result[0])[..., 0] == 0, np.array(result[3]) > 0)
+            seen.add(result[0].tobytes())
+        self.assertGreater(len(seen), 1)
+
+    def test_explicit_equal_probabilities_still_sample_independently(self):
+        originals = self.inputs()
+        config = self.config(
+            horizontal_flip_probability=0.5,
+            drawing={"horizontal_flip_probability": 0.5},
+            hatch={"horizontal_flip_probability": 0.5},
+        )
+        config = AugmentationSettings.model_validate_json(config.model_dump_json())
+        aug = TrainingAugmentation(config)
+        different = False
+        for _ in range(20):
+            result = aug(*originals)
+            for image in result:
+                self.addCleanup(image.close)
+            different |= result[0].tobytes() != result[2].tobytes()
+        self.assertTrue(different)
+
+    def test_one_axis_override_does_not_disable_other_shared_axis(self):
+        originals = self.inputs()
+        result = self.run_aug(self.config(
+            horizontal_flip_probability=1, vertical_flip_probability=1,
+            hatch={"horizontal_flip_probability": 0},
+        ), originals)
+        for i in (0, 1, 3):
+            np.testing.assert_array_equal(result[i], np.array(originals[i])[::-1, ::-1])
+        np.testing.assert_array_equal(result[2], np.array(originals[2])[::-1])
 
     def test_separate_augmentation_is_reproducible(self):
         originals = self.inputs()

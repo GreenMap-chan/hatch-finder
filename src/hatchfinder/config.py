@@ -55,8 +55,7 @@ class AugmentationSettings(StrictModel):
     max_retries: int = Field(default=5, ge=1)
     horizontal_flip_probability: float = Field(default=0.5, ge=0.0, le=1.0)
     vertical_flip_probability: float = Field(default=0.5, ge=0.0, le=1.0)
-    drawing_rotate_90_probability: float = Field(default=0.75, ge=0.0, le=1.0)
-    hatch_rotate_90_probability: float = Field(default=0.75, ge=0.0, le=1.0)
+    rotate_90_probability: float = Field(default=0.75, ge=0.0, le=1.0)
     affine_probability: float = Field(default=0.5, ge=0.0, le=1.0)
     affine_angle_degrees: float = Field(default=2.0, ge=0.0)
     affine_translate_percent: float = Field(default=0.02, ge=0.0)
@@ -86,14 +85,46 @@ class AugmentationSettings(StrictModel):
     drawing: ImageAugmentationOverrides | None = None
     hatch: ImageAugmentationOverrides | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_rotation_settings(cls, data):
+        """Old per-input rotation names remain explicitly independent overrides."""
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        for branch in ("drawing", "hatch"):
+            key = f"{branch}_rotate_90_probability"
+            if key not in data:
+                continue
+            value = data.pop(key)
+            if value is None:
+                continue
+            overrides = data.get(branch)
+            if isinstance(overrides, ImageAugmentationOverrides):
+                overrides = overrides.model_dump(exclude_none=True)
+            if overrides is not None and not isinstance(overrides, dict):
+                raise ValueError(f"augmentation.{branch} must be a mapping")
+            overrides = dict(overrides or {})
+            existing = overrides.get("rotate_90_probability")
+            if existing is not None and existing != value:
+                raise ValueError(f"Conflicting {key} and {branch}.rotate_90_probability")
+            overrides["rotate_90_probability"] = value
+            data[branch] = overrides
+        return data
+
+    def independent_transform(self, branch: Literal["drawing", "hatch"], transform: str) -> bool:
+        overrides = getattr(self, branch)
+        return overrides is not None and any(
+            field.startswith(transform + "_") and getattr(overrides, field) is not None
+            for field in ImageAugmentationOverrides.model_fields
+        )
+
     def for_branch(self, branch: Literal["drawing", "hatch"]) -> "AugmentationSettings":
         """Resolve partial overrides, validating ranges after inheritance."""
         data = self.model_dump(exclude={"drawing", "hatch"})
         overrides = getattr(self, branch)
         if overrides is not None:
             patch = overrides.model_dump(exclude_none=True)
-            if "rotate_90_probability" in patch:
-                patch[f"{branch}_rotate_90_probability"] = patch.pop("rotate_90_probability")
             data.update(patch)
         # The global switch always wins, including over branch enabled: true.
         data["enabled"] = self.enabled and data["enabled"]

@@ -85,6 +85,7 @@ runtime:
   device: auto
 
 augmentation:
+  # Shared transforms use one decision and sampled parameters for both inputs.
   enabled: true
   seed: 42
   max_retries: 5
@@ -92,8 +93,7 @@ augmentation:
   horizontal_flip_probability: 0.5
   vertical_flip_probability: 0.5
 
-  drawing_rotate_90_probability: 0.75
-  hatch_rotate_90_probability: 0.75
+  rotate_90_probability: 0.75
 
   affine_probability: 0.5
   affine_angle_degrees: 2.0
