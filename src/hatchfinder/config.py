@@ -29,6 +29,7 @@ class ImageAugmentationOverrides(StrictModel):
     resize_probability: float | None = None
     resize_scale_min: float | None = None
     resize_scale_max: float | None = None
+    resize_min_side: int | None = None
     resize_interpolation: ResizeInterpolation | None = None
     brightness_probability: float | None = None
     brightness_min: float | None = None
@@ -64,6 +65,7 @@ class AugmentationSettings(StrictModel):
     resize_probability: float = Field(default=0.0, ge=0.0, le=1.0)
     resize_scale_min: float = Field(default=0.5, gt=0.0, allow_inf_nan=False)
     resize_scale_max: float = Field(default=1.5, gt=0.0, allow_inf_nan=False)
+    resize_min_side: int = Field(default=1, ge=1)
     resize_interpolation: ResizeInterpolation = "nearest"
     brightness_probability: float = Field(default=0.3, ge=0.0, le=1.0)
     brightness_min: float = Field(default=0.9, ge=0.0)

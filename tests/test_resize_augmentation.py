@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -125,6 +126,64 @@ class ResizeAugmentationTests(unittest.TestCase):
         )), self.inputs())
         self.assertEqual(result[2].size, (1, 1))
 
+    def test_minimum_side_adjusts_sampling_range_before_sampling(self):
+        inputs = self.inputs()  # Hatch is 24x16, so a 12px floor means scale >= .75.
+        aug = TrainingAugmentation(self.config(hatch=dict(
+            resize_probability=1, resize_scale_min=0.3, resize_scale_max=2,
+            resize_min_side=12,
+        )))
+        sizes = set()
+        with patch.object(aug.random, "uniform", wraps=aug.random.uniform) as sample:
+            for _ in range(20):
+                result = aug(*inputs)
+                for image in result:
+                    self.addCleanup(image.close)
+                sample.assert_called_with(0.75, 2)
+                sizes.add(result[2].size)
+                self.assertGreaterEqual(min(result[2].size), 12)
+                self.assertLessEqual(min(result[2].size), 32)
+                for i in (0, 1, 3):
+                    np.testing.assert_array_equal(np.array(result[i]), np.array(inputs[i]))
+        self.assertGreater(len(sizes), 5)
+
+    def test_impossible_minimum_skips_resize_without_exceeding_maximum(self):
+        inputs = self.inputs()
+        aug = TrainingAugmentation(self.config(
+            resize_probability=1, resize_scale_min=0.3, resize_scale_max=2,
+            resize_min_side=40,
+        ))
+        with patch.object(aug.random, "uniform", wraps=aug.random.uniform) as sample:
+            result = aug(*inputs)
+            sample.assert_not_called()
+        for before, after in zip(inputs, result):
+            self.addCleanup(after.close)
+            np.testing.assert_array_equal(np.array(before), np.array(after))
+
+    def test_minimum_equal_to_upper_bound_keeps_drawing_masks_aligned(self):
+        inputs = self.inputs()
+        result = self.augment(self.config(drawing=dict(
+            resize_probability=1, resize_scale_min=0.3, resize_scale_max=2,
+            resize_min_side=32,
+        )), inputs)
+        for i in (0, 1, 3):
+            expected = np.repeat(np.repeat(np.array(inputs[i]), 2, axis=0), 2, axis=1)
+            np.testing.assert_array_equal(np.array(result[i]), expected)
+        np.testing.assert_array_equal(np.array(result[2]), np.array(inputs[2]))
+
+    def test_minimum_side_inherits_and_can_be_overridden_after_serialization(self):
+        config = self.config(resize_min_side=16, drawing={}, hatch={"resize_min_side": 8})
+        restored = Config.model_validate_json(Config(augmentation=config).model_dump_json()).augmentation
+        self.assertEqual(restored.for_branch("drawing").resize_min_side, 16)
+        self.assertEqual(restored.for_branch("hatch").resize_min_side, 8)
+        config = self.config(resize_min_side=16, hatch={"resize_min_side": None})
+        self.assertEqual(config.for_branch("hatch").resize_min_side, 16)
+
+    def test_minimum_side_does_not_force_resize_when_disabled(self):
+        inputs = self.inputs()
+        result = self.augment(self.config(resize_probability=0, resize_min_side=100), inputs)
+        for before, after in zip(inputs, result):
+            np.testing.assert_array_equal(np.array(before), np.array(after))
+
     def test_disappearing_positive_target_falls_back_to_original(self):
         # The single center pixel misses this off-center target under nearest resize.
         inputs = self.inputs()
@@ -141,6 +200,7 @@ class ResizeAugmentationTests(unittest.TestCase):
             {"resize_scale_min": 2, "resize_scale_max": 1},
             {"resize_scale_max": float("inf")}, {"resize_scale_min": float("nan")},
             {"resize_interpolation": "unknown"},
+            {"resize_min_side": 0}, {"resize_min_side": -1}, {"resize_min_side": 1.5},
         ):
             for overrides in (invalid, {"hatch": invalid}, {"drawing": invalid}):
                 with self.subTest(overrides=overrides), self.assertRaises(ValidationError):

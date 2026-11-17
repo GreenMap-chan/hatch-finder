@@ -105,6 +105,7 @@ augmentation:
   resize_probability: 0.0
   resize_scale_min: 0.5
   resize_scale_max: 1.5
+  resize_min_side: 1
   resize_interpolation: nearest  # nearest, bilinear, bicubic, lanczos
 
   brightness_probability: 0.3
@@ -144,5 +145,6 @@ augmentation:
   #   resize_probability: 0.8
   #   resize_scale_min: 0.3
   #   resize_scale_max: 2.0
+  #   resize_min_side: 16
   #   resize_interpolation: nearest
   # Use enabled: false inside either mapping to disable that branch.

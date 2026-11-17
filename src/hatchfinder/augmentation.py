@@ -176,7 +176,15 @@ class TrainingAugmentation:
         # Do not consume RNG when disabled: old configurations keep their results.
         if config.resize_probability == 0 or not self._happens(config.resize_probability):
             return images
-        scale = self.random.uniform(config.resize_scale_min, config.resize_scale_max)
+        minimum_scale = config.resize_scale_min
+        # Tighten the sampling range before drawing a scale, without piling up
+        # clamped samples at the boundary or exceeding the configured maximum.
+        # The default 1 preserves legacy rounding/clamping to a one-pixel side.
+        if config.resize_min_side > 1:
+            minimum_scale = max(minimum_scale, config.resize_min_side / min(images[0].size))
+        if minimum_scale > config.resize_scale_max:
+            return images
+        scale = self.random.uniform(minimum_scale, config.resize_scale_max)
         size = tuple(max(1, round(dimension * scale)) for dimension in images[0].size)
         interpolation = {
             "nearest": Image.Resampling.NEAREST,
