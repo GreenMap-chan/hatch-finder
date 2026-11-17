@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 PT_FORMAT_VERSION = 1
+ResizeInterpolation = Literal["nearest", "bilinear", "bicubic", "lanczos"]
 
 
 class StrictModel(BaseModel):
@@ -25,6 +26,10 @@ class ImageAugmentationOverrides(StrictModel):
     affine_translate_percent: float | None = None
     affine_scale_min: float | None = None
     affine_scale_max: float | None = None
+    resize_probability: float | None = None
+    resize_scale_min: float | None = None
+    resize_scale_max: float | None = None
+    resize_interpolation: ResizeInterpolation | None = None
     brightness_probability: float | None = None
     brightness_min: float | None = None
     brightness_max: float | None = None
@@ -56,6 +61,10 @@ class AugmentationSettings(StrictModel):
     affine_translate_percent: float = Field(default=0.02, ge=0.0)
     affine_scale_min: float = Field(default=0.95, gt=0.0)
     affine_scale_max: float = Field(default=1.05, gt=0.0)
+    resize_probability: float = Field(default=0.0, ge=0.0, le=1.0)
+    resize_scale_min: float = Field(default=0.5, gt=0.0, allow_inf_nan=False)
+    resize_scale_max: float = Field(default=1.5, gt=0.0, allow_inf_nan=False)
+    resize_interpolation: ResizeInterpolation = "nearest"
     brightness_probability: float = Field(default=0.3, ge=0.0, le=1.0)
     brightness_min: float = Field(default=0.9, ge=0.0)
     brightness_max: float = Field(default=1.1, ge=0.0)
@@ -94,6 +103,7 @@ class AugmentationSettings(StrictModel):
             raise ValueError("blur_kernel_size must be odd")
         ranges = (
             ("affine_scale", self.affine_scale_min, self.affine_scale_max),
+            ("resize_scale", self.resize_scale_min, self.resize_scale_max),
             ("brightness", self.brightness_min, self.brightness_max),
             ("contrast", self.contrast_min, self.contrast_max),
             ("gamma", self.gamma_min, self.gamma_max),

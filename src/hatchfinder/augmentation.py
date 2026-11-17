@@ -107,6 +107,10 @@ class TrainingAugmentation:
             )
             hatch = self._affine_image(hatch)
 
+        drawing, search_mask, target = self._resize_group(
+            (drawing, search_mask, target), self.config,
+        )
+        hatch, = self._resize_group((hatch,), self.config)
         drawing = self._augment_appearance(drawing)
         hatch = self._augment_appearance(hatch)
         target = self._clip_target(target, search_mask)
@@ -142,6 +146,9 @@ class TrainingAugmentation:
                 drawing, search_mask, target = self._affine_drawing_group(
                     drawing, search_mask, target, dc,
                 )
+            drawing, search_mask, target = self._resize_group(
+                (drawing, search_mask, target), dc,
+            )
             drawing = self._augment_appearance(drawing, dc)
 
         if hc.enabled:
@@ -155,9 +162,32 @@ class TrainingAugmentation:
                 )
             if self._happens(hc.affine_probability):
                 hatch = self._affine_image(hatch, hc)
+            hatch, = self._resize_group((hatch,), hc)
             hatch = self._augment_appearance(hatch, hc)
 
         return drawing, search_mask, hatch, self._clip_target(target, search_mask)
+
+    def _resize_group(
+        self,
+        images: tuple[Image.Image, ...],
+        config: AugmentationSettings,
+    ) -> tuple[Image.Image, ...]:
+        """Resize RGB followed by optional aligned masks, without cropping/padding."""
+        # Do not consume RNG when disabled: old configurations keep their results.
+        if config.resize_probability == 0 or not self._happens(config.resize_probability):
+            return images
+        scale = self.random.uniform(config.resize_scale_min, config.resize_scale_max)
+        size = tuple(max(1, round(dimension * scale)) for dimension in images[0].size)
+        interpolation = {
+            "nearest": Image.Resampling.NEAREST,
+            "bilinear": Image.Resampling.BILINEAR,
+            "bicubic": Image.Resampling.BICUBIC,
+            "lanczos": Image.Resampling.LANCZOS,
+        }[config.resize_interpolation]
+        return tuple(
+            image.resize(size, interpolation if i == 0 else Image.Resampling.NEAREST)
+            for i, image in enumerate(images)
+        )
 
     def _affine_drawing_group(
         self,

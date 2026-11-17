@@ -101,6 +101,12 @@ augmentation:
   affine_scale_min: 0.95
   affine_scale_max: 1.05
 
+  # Resize the image canvas; Masks always use nearest.
+  resize_probability: 0.0
+  resize_scale_min: 0.5
+  resize_scale_max: 1.5
+  resize_interpolation: nearest  # nearest, bilinear, bicubic, lanczos
+
   brightness_probability: 0.3
   brightness_min: 0.9
   brightness_max: 1.1
@@ -135,4 +141,8 @@ augmentation:
   #   affine_scale_max: 1.5
   #   rotate_90_probability: 0.75
   #   blur_probability: 0.3
+  #   resize_probability: 0.8
+  #   resize_scale_min: 0.3
+  #   resize_scale_max: 2.0
+  #   resize_interpolation: nearest
   # Use enabled: false inside either mapping to disable that branch.
