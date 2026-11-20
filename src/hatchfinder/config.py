@@ -357,9 +357,15 @@ class SearchMaskGenerationSettings(StrictModel):
 
 class DataSettings(StrictModel):
     dataset: Path | None = None
-    drawing_pad_multiple: int = Field(default=64, gt=0)
     load_dataset_examples: int = Field(default=16, gt=0)
     search_mask_generation: SearchMaskGenerationSettings = Field(default_factory=SearchMaskGenerationSettings)
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_drawing_pad_multiple(cls, data: object) -> object:
+        if isinstance(data, dict) and "drawing_pad_multiple" in data:
+            return {key: value for key, value in data.items() if key != "drawing_pad_multiple"}
+        return data
 
 
 class OutputSettings(StrictModel):

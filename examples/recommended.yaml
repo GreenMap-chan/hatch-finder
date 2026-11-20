@@ -72,7 +72,6 @@ training:
 
 data:
   dataset: null  # Set in your local YAML or pass dataset_path to Train.
-  drawing_pad_multiple: 64
   load_dataset_examples: 16
 
 output:

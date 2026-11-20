@@ -73,7 +73,6 @@ training:
 
 data:
   dataset: "./sample_dataset"
-  drawing_pad_multiple: 64
   load_dataset_examples: 16
   search_mask_generation:
     enabled: false

@@ -4,7 +4,6 @@ from torchvision.transforms.functional import to_tensor
 from pathlib import Path
 from contextlib import ExitStack
 import json
-import math
 import random
 import torch
 import torch.nn.functional as F
@@ -192,6 +191,8 @@ class HatchDataset(Dataset):
 
         pad_h = target_h - h
         pad_w = target_w - w
+        if pad_h == 0 and pad_w == 0:
+            return tensor
 
         return F.pad(
             tensor,
@@ -202,10 +203,6 @@ class HatchDataset(Dataset):
     def collate_fn(self, batch):
         max_h = max(item["drawing"].shape[-2] for item in batch)
         max_w = max(item["drawing"].shape[-1] for item in batch)
-
-        multiple = self.data_config.drawing_pad_multiple
-        max_h = math.ceil(max_h / multiple) * multiple
-        max_w = math.ceil(max_w / multiple) * multiple
 
         max_hatch_h = max(item["hatch"].shape[-2] for item in batch)
         max_hatch_w = max(item["hatch"].shape[-1] for item in batch)

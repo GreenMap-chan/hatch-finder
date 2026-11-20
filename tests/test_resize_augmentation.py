@@ -273,11 +273,11 @@ class ResizeAugmentationTests(unittest.TestCase):
             inputs = self.inputs()
             names = ("drawing", "search_mask", "hatch", "target")
             manifest = []
-            for index, scale in enumerate((1, 2)):
+            for index, size in enumerate(((24, 16), (18, 30))):
                 row = {}
                 for name, image in zip(names, inputs):
                     filename = f"{index}_{name}.png"
-                    with image.resize((24 * scale, 16 * scale), Image.Resampling.NEAREST) as resized:
+                    with image.resize(size, Image.Resampling.NEAREST) as resized:
                         resized.save(root / filename)
                     row[name] = filename
                 manifest.append(row)
@@ -292,10 +292,22 @@ class ResizeAugmentationTests(unittest.TestCase):
             train = HatchDataset(root, "train", DataSettings(), config, augment=True)
             items = [train[0], train[1]]
             self.assertEqual(tuple(items[0]["drawing"].shape), (3, 32, 48))
+            single = train.collate_fn(items[:1])
+            for key in names:
+                self.assertTrue(single[key][0].equal(items[0][key]), key)
             batch = train.collate_fn(items)
-            self.assertEqual(tuple(batch["drawing"].shape), (2, 3, 64, 128))
-            self.assertEqual(tuple(batch["hatch"].shape), (2, 3, 16, 24))
-            self.assertEqual(tuple(batch["target"].shape), (2, 1, 64, 128))
+            self.assertEqual(tuple(batch["drawing"].shape), (2, 3, 60, 48))
+            self.assertEqual(tuple(batch["hatch"].shape), (2, 3, 15, 12))
+            for key in ("search_mask", "target"):
+                self.assertEqual(tuple(batch[key].shape), (2, 1, 60, 48))
+            for index, item in enumerate(items):
+                for key in names:
+                    h, w = item[key].shape[-2:]
+                    padded = batch[key][index]
+                    self.assertTrue(padded[:, :h, :w].equal(item[key]), key)
+                    fill = 1 if key in ("drawing", "hatch") else 0
+                    self.assertTrue((padded[:, h:, :] == fill).all(), key)
+                    self.assertTrue((padded[:, :, w:] == fill).all(), key)
             valid = HatchDataset(root, "valid", DataSettings(), config)
             self.assertEqual(tuple(valid[0]["drawing"].shape), (3, 16, 24))
             self.assertEqual(tuple(valid[0]["hatch"].shape), (3, 16, 24))
