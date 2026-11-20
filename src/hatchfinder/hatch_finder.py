@@ -240,8 +240,17 @@ class HatchFinder(nn.Module):
         hatch: Image.Image | Path,
         debug_path: Path | None = None,
         confidence: float | None = None,
-    ):
-        return inference.infer(self, drawing, mask, hatch, debug_path, confidence)
+        *,
+        imgsz: int | tuple[int, int] | None = None,
+        rect: bool = True,
+    ) -> torch.Tensor:
+        """Fit the inputs to imgsz and return probabilities at the original drawing size.
+
+        A pair specifies (height, width). With rect=False the drawing and search
+        mask are centered on that canvas. With imgsz=None all inputs keep their size.
+        """
+        return inference.infer(self, drawing, mask, hatch, debug_path, confidence,
+                               imgsz=imgsz, rect=rect)
 
     @staticmethod
     def _save_inference_debug(

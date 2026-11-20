@@ -73,6 +73,8 @@ training:
 
 data:
   dataset: "./sample_dataset"
+  imgsz: null  # Base size before augmentation: longest side or [height, width].
+  rect: true   # Use the fitted rectangle. False centers the drawing on the requested canvas.
   load_dataset_examples: 16
   search_mask_generation:
     enabled: false

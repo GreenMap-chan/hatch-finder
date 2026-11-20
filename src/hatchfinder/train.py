@@ -13,6 +13,7 @@ from typing import Any, Literal
 from .config import Config, ModelSettings, config_from_pt_data, model_config_from_pt_data, save_config, merge_model_settings
 from .architecture_transfer import transfer_weights
 from .hatch_dataset import HatchDataset
+from .image_geometry import canvas_size
 from . import losses
 from torch.utils.data import DataLoader
 
@@ -97,6 +98,7 @@ class Train:
         dataset_specified = "dataset" in config.data.model_fields_set or not isinstance(dataset_path, _Unset)
         device_specified = "device" in config.runtime.model_fields_set or not isinstance(device, _Unset)
         window_overrides = config.data.search_mask_generation.model_dump(exclude_unset=True)
+        size_overrides = config.data.model_dump(include={"imgsz", "rect"}, exclude_unset=True)
 
         if training_overrides:
             config.training = type(config.training).model_validate({
@@ -167,6 +169,13 @@ class Train:
                     or previous_dataset.resolve() != new_dataset.resolve()
                 )
                 checkpoint_config.data.dataset = config.data.dataset
+            if size_overrides:
+                previous = checkpoint_config.data
+                updated = type(previous).model_validate({**previous.model_dump(), **size_overrides})
+                old_geometry = (canvas_size(previous.imgsz), previous.rect) if previous.imgsz is not None else None
+                new_geometry = (canvas_size(updated.imgsz), updated.rect) if updated.imgsz is not None else None
+                dataset_changed |= old_geometry != new_geometry
+                checkpoint_config.data = updated
             if window_overrides:
                 previous = checkpoint_config.data.search_mask_generation
                 updated = type(previous).model_validate({**previous.model_dump(), **window_overrides})

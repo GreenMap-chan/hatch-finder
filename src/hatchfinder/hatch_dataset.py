@@ -10,7 +10,8 @@ import torch.nn.functional as F
 
 from .augmentation import TrainingAugmentation
 from .config import AugmentationSettings, DataSettings
-from .search_windows import SampleKind, choose_window, sample_kind
+from .image_geometry import fit_geometry, resize_input
+from .search_windows import SampleKind, generate_window_mask, sample_kind
 
 
 class HatchDataset(Dataset):
@@ -31,7 +32,7 @@ class HatchDataset(Dataset):
         self.augmentation_config = augmentation_config
         self.split = dataset_type
         self.generation = data_config.search_mask_generation
-        self.augment = augment
+        self.augment = augment and dataset_type == "train"
         self._augmentation = None
         self._augmentation_worker_id = None
         self._window_rng = None
@@ -137,15 +138,26 @@ class HatchDataset(Dataset):
             drawing = load("drawing", "RGB")
             hatch = load("hatch", "RGB")
             target = load("target", "L")
+            if drawing.size != target.size:
+                raise ValueError(f"Drawing and target sizes differ for {item['drawing']}")
             if rng is None:
                 mask = load("search_mask", "L")
+                if drawing.size != mask.size:
+                    raise ValueError(f"Drawing and search mask sizes differ for {item['drawing']}")
             else:
-                if drawing.size != target.size:
-                    raise ValueError(f"Drawing and full target sizes differ for {item['drawing']}")
                 mask = Image.new("L", drawing.size, 255)
                 images.callback(mask.close)
+                if kind is None:
+                    kind = "positive" if target.getextrema()[1] > 127 else "absent"
 
-            if self.augment and (rng is None or self.split == "train"):
+            scale, padding = fit_geometry(drawing.size, self.data_config.imgsz, self.data_config.rect)
+            if scale != 1.0 or any(padding):
+                drawing = resize_input(drawing, "RGB", scale, images, padding)
+                hatch = resize_input(hatch, "RGB", scale, images)
+                mask = resize_input(mask, "L", scale, images, padding)
+                target = resize_input(target, "L", scale, images, padding)
+
+            if self.augment:
                 drawing, mask, hatch, target = self._get_augmentation()(
                     drawing, mask, hatch, target
                 )
@@ -153,15 +165,12 @@ class HatchDataset(Dataset):
                     images.callback(image.close)
 
             if rng is not None:
-                if kind is None:
-                    kind = "positive" if target.getextrema()[1] > 127 else "absent"
-                bounds = choose_window(target, kind, self.generation, rng, quantiles,
-                                       full_tile, exhaustive=exhaustive)
-                if bounds is None:
+                content = mask if self.data_config.imgsz is not None and not self.data_config.rect else None
+                mask = generate_window_mask(target, kind, self.generation, rng, quantiles, full_tile,
+                                            exhaustive=exhaustive, content=content)
+                if mask is None:
                     return None
-                mask = Image.new("L", drawing.size, 0)
                 images.callback(mask.close)
-                mask.paste(255, bounds)
 
             drawing_tensor = to_tensor(drawing)
             mask_tensor = (to_tensor(mask) > 0.5).float()

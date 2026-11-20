@@ -82,6 +82,24 @@ and binarized at `0.5`. The returned tensor contains probabilities in the
 masked area and zeros outside it. When `debug_path` is provided, an overlay is
 saved as `<drawing_name>_debug.png`.
 
+By default, `infer()` uses the original image sizes. Set `imgsz` to resize a
+tile while preserving its aspect ratio. An integer specifies its longest side.
+A pair specifies a bounding box in **(height, width)** order. The drawing and
+legend use the same scale factor, including when the tile is enlarged.
+
+For a 1792 × 896 drawing (width × height):
+
+| Call | Input to the model |
+| --- | --- |
+| `model.infer(drawing, mask, hatch, imgsz=896)` | 896 × 448 |
+| `model.infer(drawing, mask, hatch, imgsz=896, rect=False)` | 896 × 896, with 224 white pixels above and below the drawing |
+
+The default `rect=True` uses the fitted size. With `rect=False` and an explicit
+`imgsz`, the drawing is centered on the requested canvas. The search mask uses
+nearest-neighbor resizing and zero padding. The legend keeps its scaled size.
+Both modes return the heatmap and debug overlay in the original drawing
+coordinates, with heatmap values set to zero outside the original search mask.
+
 ## Cross-attention matching
 
 Optional cross-attention compares drawing locations with individual pooled hatch
@@ -168,6 +186,19 @@ set `training.loss: bce_tversky`; `training.tversky_fp_weight` and
 Validation and checkpoint selection continue to use BCE + soft Dice, so their
 reported values remain comparable across training-loss choices. Existing
 checkpoints without `training.loss` continue to use BCE + Dice.
+
+Set `data.imgsz` to the base resolution for both training and validation.
+An integer sets the longest side. A YAML pair such as `[640, 896]` sets the
+bounding height and width. The default `null` keeps the dataset resolution.
+As in `infer()`, `data.rect: true` uses the fitted rectangle, and `false`
+centers it on the requested canvas. The drawing and legend share the base
+scale. Both search and target masks use nearest-neighbor resizing.
+
+Training applies augmentations **after** this step. For example, a square tile
+with `data.imgsz: 896` and a drawing resize factor of 1.05 reaches the model
+at 941 × 941. Validation uses the base geometry directly (896 × 896 in this
+example). On resume, omitted size settings come from the checkpoint. Explicit
+changes to the base geometry start a fresh comparison of validation metrics.
 
 Using `batch_size: 1` is strongly recommended when hatch images in the dataset
 have different dimensions. Batches containing multiple examples pad smaller
@@ -259,6 +290,10 @@ pixels inside a positive window at the augmented drawing resolution, before
 batch padding. Both negative types have zero matching pixels inside the window.
 `full_tile_probability` selects the whole tile for positive and absent-legend
 samples, overriding the rectangular size and margin limits for that draw.
+When the base canvas adds padding, window fractions and margins use the
+bounding box of the transformed drawing content. Generated rectangles stay
+entirely inside that content, including after affine transforms. A full-tile
+search covers all of the content and gives the padding zero weight.
 
 Validation uses the stored window when supplied. For three-file validation
 rows the loader generates a repeatable window using the augmentation seed and

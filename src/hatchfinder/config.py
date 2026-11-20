@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import torch
 import yaml
@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PT_FORMAT_VERSION = 1
 ResizeInterpolation = Literal["nearest", "bilinear", "bicubic", "lanczos", "random"]
+ImageSide = Annotated[int, Field(strict=True, gt=0)]
 
 
 class StrictModel(BaseModel):
@@ -357,6 +358,8 @@ class SearchMaskGenerationSettings(StrictModel):
 
 class DataSettings(StrictModel):
     dataset: Path | None = None
+    imgsz: ImageSide | tuple[ImageSide, ImageSide] | None = None
+    rect: bool = True
     load_dataset_examples: int = Field(default=16, gt=0)
     search_mask_generation: SearchMaskGenerationSettings = Field(default_factory=SearchMaskGenerationSettings)
 
