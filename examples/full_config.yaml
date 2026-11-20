@@ -75,6 +75,17 @@ data:
   dataset: "./sample_dataset"
   drawing_pad_multiple: 64
   load_dataset_examples: 16
+  search_mask_generation:
+    enabled: false
+    negative_fraction: 0.20
+    outside_window_share_of_negatives: 0.50
+    min_margin_fraction: 0.0
+    area_fraction_min: 0.15
+    area_fraction_max: 0.65
+    aspect_ratio_min: 0.5
+    aspect_ratio_max: 2.0
+    min_positive_pixels: 32
+    full_tile_probability: 0.0
 
 output:
   directory: "../runs/full_sample"

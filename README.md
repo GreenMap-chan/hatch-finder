@@ -195,7 +195,8 @@ convert_checkpoint_to_model(
 ## Dataset structure
 
 A dataset must contain separate `train` and `valid` splits. Each split has a
-JSON Lines manifest and four image directories:
+JSON Lines manifest with paths to drawings, legends and targets. Datasets with
+saved search windows also supply search masks, as shown below.
 
 ```text
 dataset/
@@ -221,7 +222,7 @@ dataset root:
 ```
 
 - `drawing` is an RGB drawing.
-- `search_mask` is a grayscale mask of the area in which to search.
+- `search_mask`, when supplied, is a grayscale mask of the area in which to search.
 - `hatch` is an RGB image of the hatch pattern to find.
 - `target` is a grayscale ground-truth mask. White pixels mark matches; an
   all-black target represents a negative example.
@@ -229,6 +230,45 @@ dataset root:
 Images belonging to one example may have arbitrary filenames, but `drawing`,
 `search_mask`, and `target` must have the same spatial dimensions. The hatch
 image may have a different size.
+
+### Generate search masks during training
+
+The manifest supports two formats.
+
+- **Saved window.** Supply `drawing`, `hatch`, `search_mask`, and `target`.
+  The loader uses the saved window and its target, including when mask
+  generation is enabled.
+- **Generated window.** Supply `drawing`, `hatch`, and `target`, and set
+  `data.search_mask_generation.enabled: true`. The target must mark every
+  match across the **entire tile**. An empty target means the legend is absent
+  everywhere on that tile. The loader generates a window and clips the target
+  to it when it samples the training row.
+
+The defaults for the optional mode are shown in
+[the complete configuration](examples/full_config.yaml). With
+`negative_fraction: 0.20` and `outside_window_share_of_negatives: 0.50`,
+training draws about 80% positives, 10% pairs with an absent legend, and 10%
+pairs with the legend visible only outside the window. The trainer logs the
+observed proportions among generated windows per epoch. Rows with whole-tile
+targets must supply each requested source pool.
+
+Window dimensions satisfy `area_fraction_min/max` relative to the whole tile
+and `aspect_ratio_min/max` in width divided by height. `min_margin_fraction`
+applies independently to both axes. `min_positive_pixels` counts matching
+pixels inside a positive window at the augmented drawing resolution, before
+batch padding. Both negative types have zero matching pixels inside the window.
+`full_tile_probability` selects the whole tile for positive and absent-legend
+samples, overriding the rectangular size and margin limits for that draw.
+
+Validation uses the stored window when supplied. For three-file validation
+rows the loader generates a repeatable window using the augmentation seed and
+manifest row index, keeping each original pair and its positive or absent type.
+To evaluate outside-window negatives at fixed locations, include their saved
+validation search masks.
+
+On checkpoint resume, explicit window settings override saved settings. The
+two training sampling fractions preserve the best metric and patience. Changing
+settings that affect generated validation windows resets that comparison.
 
 ## Sample dataset
 

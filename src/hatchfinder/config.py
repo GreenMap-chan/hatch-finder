@@ -334,10 +334,32 @@ class TrainingSettings(StrictModel):
         return self
 
 
+class SearchMaskGenerationSettings(StrictModel):
+    enabled: bool = False
+    negative_fraction: float = Field(default=0.20, ge=0, le=1)
+    outside_window_share_of_negatives: float = Field(default=0.50, ge=0, le=1)
+    min_margin_fraction: float = Field(default=0, ge=0, lt=0.5)
+    area_fraction_min: float = Field(default=0.15, gt=0, le=1)
+    area_fraction_max: float = Field(default=0.65, gt=0, le=1)
+    aspect_ratio_min: float = Field(default=0.5, gt=0, allow_inf_nan=False)
+    aspect_ratio_max: float = Field(default=2.0, gt=0, allow_inf_nan=False)
+    min_positive_pixels: int = Field(default=32, ge=1)
+    full_tile_probability: float = Field(default=0, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> "SearchMaskGenerationSettings":
+        if self.area_fraction_min > self.area_fraction_max:
+            raise ValueError("area_fraction_min must not exceed area_fraction_max")
+        if self.aspect_ratio_min > self.aspect_ratio_max:
+            raise ValueError("aspect_ratio_min must not exceed aspect_ratio_max")
+        return self
+
+
 class DataSettings(StrictModel):
     dataset: Path | None = None
     drawing_pad_multiple: int = Field(default=64, gt=0)
     load_dataset_examples: int = Field(default=16, gt=0)
+    search_mask_generation: SearchMaskGenerationSettings = Field(default_factory=SearchMaskGenerationSettings)
 
 
 class OutputSettings(StrictModel):

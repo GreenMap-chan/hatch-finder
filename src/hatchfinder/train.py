@@ -1,6 +1,8 @@
 from .hatch_finder import HatchFinder
 from .logger import Logger
 
+from collections import Counter
+import json
 import torch
 import math
 import shutil
@@ -94,6 +96,7 @@ class Train:
         output_specified = "directory" in config.output.model_fields_set or not isinstance(output_path, _Unset)
         dataset_specified = "dataset" in config.data.model_fields_set or not isinstance(dataset_path, _Unset)
         device_specified = "device" in config.runtime.model_fields_set or not isinstance(device, _Unset)
+        window_overrides = config.data.search_mask_generation.model_dump(exclude_unset=True)
 
         if training_overrides:
             config.training = type(config.training).model_validate({
@@ -164,6 +167,19 @@ class Train:
                     or previous_dataset.resolve() != new_dataset.resolve()
                 )
                 checkpoint_config.data.dataset = config.data.dataset
+            if window_overrides:
+                previous = checkpoint_config.data.search_mask_generation
+                updated = type(previous).model_validate({**previous.model_dump(), **window_overrides})
+                training_only = {"negative_fraction", "outside_window_share_of_negatives"}
+                validation_windows_changed = (
+                    (updated.enabled or previous.enabled)
+                    and updated.model_dump(exclude=training_only) != previous.model_dump(exclude=training_only)
+                )
+                dataset = checkpoint_config.data.dataset
+                if validation_windows_changed and not dataset_changed and dataset is not None:
+                    with (dataset / "valid" / "manifest.jsonl").open(encoding="utf-8") as manifest:
+                        dataset_changed = any(not json.loads(row).get("search_mask") for row in manifest)
+                checkpoint_config.data.search_mask_generation = updated
             if device_specified:
                 checkpoint_config.runtime.device = config.runtime.device
             checkpoint_config.training.checkpoint_path = checkpoint_path
@@ -384,10 +400,12 @@ class Train:
         batch_size = self.config.training.batch_size
 
         gradient_norms = []
+        sample_counts = Counter()
         epoch_loss = torch.zeros((), device=self.model.device)
         self.optimizer.zero_grad()
         for batch_num, example in enumerate(tqdm(train_loader, total=train_batches_count, desc=f"epoch {epoch+1}/{epochs}",unit="batch",)):
             current_batch_size = example["drawing"].shape[0]
+            sample_counts.update(example.get("sample_kind", ()))
 
             # В начале каждой группы определяем,
             # сколько batch реально будет накоплено
@@ -426,6 +444,12 @@ class Train:
         clipped_steps_percent = clipped_steps / len(gradient_norms) * 100
         p95_grad_norm = torch.tensor(gradient_norms).quantile(0.95).item()
 
+        if sample_counts:
+            counts = ", ".join(
+                f"{kind}={sample_counts[kind]} ({sample_counts[kind] / sample_counts.total():.1%})"
+                for kind in ("positive", "absent", "outside")
+            )
+            self.logger.log(f"Epoch {epoch + 1} search windows: {counts}")
         return average_loss, gradient_norms, clipped_steps, clipped_steps_percent, p95_grad_norm
 
     def train(self):
@@ -446,6 +470,8 @@ class Train:
         best_metric, patience_counter = self._restore_training(
             scheduler, total_steps, warmup_epochs * epoch_steps
         )
+        # Workers inherit this before the first training batch, also on resume.
+        train_loader.dataset.window_start_epoch = self.start_epoch
         val_loss, bce_loss, dice_loss = self.get_valid_loss(valid_loader)
         best_metric = self._ensure_best_checkpoint(scheduler, best_metric, val_loss)
 
