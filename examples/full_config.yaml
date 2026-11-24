@@ -57,6 +57,7 @@ training:
 
   batch_size: 1
   gradient_accumulation_steps: 16
+  max_consecutive_skipped_updates: 0  # 0 stops on the first NaN/Inf, 1 allows one skipped update in a row.
   patience: 8
   num_workers: 4
 

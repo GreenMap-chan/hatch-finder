@@ -148,6 +148,16 @@ class SearchMaskGenerationTests(unittest.TestCase):
             with self.subTest(split=split), self.assertRaisesRegex(ValueError, "Missing search_mask"):
                 HatchDataset(self.root, split, DataSettings(), AugmentationSettings())
 
+    def test_diagnostic_ids_follow_actual_rows_after_resampling(self):
+        fixed = dict(self.rows[0], search_mask="full.png")
+        self.manifest("train", [fixed, self.rows[0], dict(self.rows[1], id="000007")])
+        data = DataSettings(search_mask_generation=dict(
+            enabled=True, negative_fraction=1, outside_window_share_of_negatives=0,
+        ))
+        ds = HatchDataset(self.root, "train", data, AugmentationSettings(), include_sample_ids=True)
+        batch = ds.collate_fn([ds[0], ds[1]])
+        self.assertEqual(batch["sample_ids"], ["train/manifest.jsonl:1 (full.png)", "000007"])
+
     def test_rare_feasible_validation_window_and_narrow_empty_window(self):
         target = Image.new("L", (100, 100))
         for point in ((4, 4), (95, 4), (4, 95), (95, 95)):

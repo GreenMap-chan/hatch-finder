@@ -187,6 +187,17 @@ Validation and checkpoint selection continue to use BCE + soft Dice, so their
 reported values remain comparable across training-loss choices. Existing
 checkpoints without `training.loss` continue to use BCE + Dice.
 
+`training.max_consecutive_skipped_updates` sets how many consecutive optimizer
+updates can be skipped for a non-finite training loss or gradient norm. The
+default `0` stops at the first failure. Set it to `1` to allow one skip and
+stop on the second consecutive failure. A skip discards the accumulation group
+and leaves the optimizer and learning-rate schedule at their previous step.
+A successful update resets the counter. Checkpoints preserve the counter, and
+you can set a new limit when resuming. The log identifies the batch and its
+sample IDs for a loss failure, or all sample IDs in the group for a gradient
+failure. Epoch summaries count skips and average loss over successful updates'
+examples.
+
 Set `data.imgsz` to the base resolution for both training and validation.
 An integer sets the longest side. A YAML pair such as `[640, 896]` sets the
 bounding height and width. The default `null` keeps the dataset resolution.

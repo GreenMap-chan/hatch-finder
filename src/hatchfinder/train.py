@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from .config import Config, ModelSettings, config_from_pt_data, model_config_from_pt_data, save_config, merge_model_settings
 from .architecture_transfer import transfer_weights
+from .checkpoint import restore_training_checkpoint
 from .hatch_dataset import HatchDataset
 from .image_geometry import canvas_size
 from . import losses
@@ -47,6 +48,7 @@ class Train:
             raise ValueError("Pixel correlation requires batch_size=1; use gradient accumulation")
         self.config = config
         self.start_epoch = 0
+        self.consecutive_skipped_updates = 0
         transfer = config.training.load_new_model_config
         self.checkpoint_path = None if transfer else config.training.checkpoint_path
         self.dataset_changed = dataset_changed
@@ -94,6 +96,10 @@ class Train:
             config = config.model_copy(deep=True)
 
         epochs_specified = "epochs" in config.training.model_fields_set or "epochs" in training_overrides
+        skip_limit_specified = (
+            "max_consecutive_skipped_updates" in config.training.model_fields_set
+            or "max_consecutive_skipped_updates" in training_overrides
+        )
         output_specified = "directory" in config.output.model_fields_set or not isinstance(output_path, _Unset)
         dataset_specified = "dataset" in config.data.model_fields_set or not isinstance(dataset_path, _Unset)
         device_specified = "device" in config.runtime.model_fields_set or not isinstance(device, _Unset)
@@ -135,7 +141,9 @@ class Train:
             ))
             return config, False
         if checkpoint_path is not None:
-            unsupported_overrides = set(training_overrides) - {"checkpoint_path", "epochs", "load_new_model_config"}
+            unsupported_overrides = set(training_overrides) - {
+                "checkpoint_path", "epochs", "load_new_model_config", "max_consecutive_skipped_updates",
+            }
             if unsupported_overrides:
                 raise ValueError(
                     "Training settings cannot be overridden when resuming: "
@@ -152,6 +160,10 @@ class Train:
                 checkpoint_config = Config()
             # This invocation is an ordinary resume, even if its source was an experiment.
             checkpoint_config.training.load_new_model_config = False
+            if skip_limit_specified:
+                checkpoint_config.training.max_consecutive_skipped_updates = (
+                    config.training.max_consecutive_skipped_updates
+                )
 
             if epochs_specified:
                 checkpoint_config.training = type(checkpoint_config.training).model_validate({
@@ -343,6 +355,7 @@ class Train:
             self.config.data,
             self.config.augmentation,
             augment=True,
+            include_sample_ids=True,
         )
         train_loader = DataLoader(
             dataset_train,
@@ -375,31 +388,33 @@ class Train:
     def _restore_training(self, scheduler, total_steps: int, warmup_steps: int):
         if self.checkpoint_path is None:
             return None, 0
-        self.start_epoch, best_metric, patience_counter = self.model.load_checkpoint(
-            self.optimizer, scheduler, self.checkpoint_path
+        self.start_epoch, best_metric, patience_counter, self.consecutive_skipped_updates = restore_training_checkpoint(
+            self.model, self.optimizer, scheduler, self.checkpoint_path
         )
         self.extend_scheduler(total_steps, warmup_steps)
         if self.dataset_changed:
             return None, 0
         return best_metric, patience_counter
 
+    def _save_checkpoint(self, scheduler, epoch, best_metric, patience_counter, path):
+        self.model.save_checkpoint(
+            self.optimizer, scheduler, epoch, best_metric, patience_counter, path,
+            consecutive_skipped_updates=self.consecutive_skipped_updates,
+        )
+
     def _ensure_best_checkpoint(self, scheduler, best_metric, val_loss: float) -> float:
         if best_metric is None:
             best_metric = val_loss
         best_path = self.output_path / "best.pt"
         if self.checkpoint_path is None or self.dataset_changed:
-            self.model.save_checkpoint(
-                self.optimizer, scheduler, self.start_epoch - 1, best_metric, 0, best_path
-            )
+            self._save_checkpoint(scheduler, self.start_epoch - 1, best_metric, 0, best_path)
         elif not best_path.exists():
             previous_best = self.checkpoint_path.parent / "best.pt"
             if previous_best.exists():
                 shutil.copy2(previous_best, best_path)
             else:
                 best_metric = val_loss
-                self.model.save_checkpoint(
-                    self.optimizer, scheduler, self.start_epoch - 1, best_metric, 0, best_path
-                )
+                self._save_checkpoint(scheduler, self.start_epoch - 1, best_metric, 0, best_path)
         return best_metric
 
     def _run_training_epoch(self, train_loader: DataLoader, scheduler, epoch: int, epochs: int):
@@ -407,18 +422,24 @@ class Train:
         train_batches_count = len(train_loader)
         gradient_accum_steps = self.config.training.gradient_accumulation_steps
         batch_size = self.config.training.batch_size
+        skip_limit = self.config.training.max_consecutive_skipped_updates
 
         gradient_norms = []
         sample_counts = Counter()
-        epoch_loss = torch.zeros((), device=self.model.device)
+        epoch_loss = 0.0
+        trained_examples = 0
+        skipped_updates = 0
         self.optimizer.zero_grad()
-        for batch_num, example in enumerate(tqdm(train_loader, total=train_batches_count, desc=f"epoch {epoch+1}/{epochs}",unit="batch",)):
+        for batch_num, example in enumerate(tqdm(train_loader, desc=f"epoch {epoch + 1}/{epochs}", unit="batch")):
             current_batch_size = example["drawing"].shape[0]
             sample_counts.update(example.get("sample_kind", ()))
 
-            # В начале каждой группы определяем,
-            # сколько batch реально будет накоплено
             if batch_num % gradient_accum_steps == 0:
+                group_start = batch_num + 1
+                group_end = min(batch_num + gradient_accum_steps, train_batches_count)
+                group_loss = 0.0
+                group_ids = []
+                skip_group = False
                 accumulation_examples_count = self.get_accumulation_examples_count(
                     batch_num=batch_num,
                     train_batches_count=train_batches_count,
@@ -426,32 +447,60 @@ class Train:
                     dataset_size=train_dataset_length,
                     gradient_accum_steps=gradient_accum_steps,
                 )
+            if skip_group:
+                continue
 
+            batch_ids = example["sample_ids"]
+            group_ids.extend(batch_ids)
             with self.autocast_context():
                 example_loss, _, _ = self.train_one_example(example)
 
-            epoch_loss += example_loss.detach() * current_batch_size
+            loss_value = example_loss.detach().item()
+            if not math.isfinite(loss_value):
+                problem = f"non-finite loss={loss_value}, batch sample IDs={batch_ids}"
+            else:
+                group_loss += loss_value * current_batch_size
+                loss_for_backward = example_loss * current_batch_size / accumulation_examples_count
+                loss_for_backward.backward()
+                if batch_num + 1 < group_end:
+                    continue
 
-            loss_for_backward = (example_loss * current_batch_size / accumulation_examples_count)
-            loss_for_backward.backward()
+                grad_norm = self.model.clip_grad_norm().item()
+                if math.isfinite(grad_norm):
+                    self.optimizer.step()
+                    scheduler.step()
+                    self.optimizer.zero_grad()
+                    self.consecutive_skipped_updates = 0
+                    gradient_norms.append(grad_norm)
+                    epoch_loss += group_loss
+                    trained_examples += accumulation_examples_count
+                    continue
+                problem = f"non-finite gradient norm={grad_norm}, group sample IDs={group_ids}"
 
+            self.optimizer.zero_grad()
+            skip_group = True
+            skipped_updates += 1
+            self.consecutive_skipped_updates += 1
+            message = (
+                f"Epoch {epoch + 1}/{epochs}, batch {batch_num + 1}/{train_batches_count}: "
+                f"skipped update (batches {group_start}-{group_end}): {problem} | "
+                f"skipped this epoch={skipped_updates}, consecutive={self.consecutive_skipped_updates}, limit={skip_limit}"
+            )
+            self.logger.log(message)
+            if self.consecutive_skipped_updates > skip_limit:
+                raise FloatingPointError(message)
 
-            if not (batch_num + 1) % gradient_accum_steps or train_batches_count == batch_num + 1:
-                grad_norm = self.model.clip_grad_norm()
-                gradient_norms.append(grad_norm.detach())
-
-                self.optimizer.step()
-                scheduler.step()
-                self.optimizer.zero_grad()
-
-        average_loss = (epoch_loss / train_dataset_length).item()
-        gradient_norms = torch.stack(gradient_norms).cpu().tolist()
-        clipped_steps = sum(
-            grad_norm > self.config.training.max_grad_norm
-            for grad_norm in gradient_norms
-        )
-        clipped_steps_percent = clipped_steps / len(gradient_norms) * 100
-        p95_grad_norm = torch.tensor(gradient_norms).quantile(0.95).item()
+        if gradient_norms:
+            clipped_steps = sum(norm > self.config.training.max_grad_norm for norm in gradient_norms)
+            p95_grad_norm = torch.tensor(gradient_norms).quantile(0.95).item()
+            metrics = (
+                f"loss: {epoch_loss / trained_examples:.3f} | max_grad_norm: {max(gradient_norms):.3f} | "
+                f"p95_grad_norm: {p95_grad_norm:.3f} | clipped_steps: {clipped_steps}/{len(gradient_norms)} "
+                f"({clipped_steps / len(gradient_norms):.1%})"
+            )
+        else:
+            metrics = "loss: n/a (no successful updates)"
+        self.logger.log(f"epoch {epoch + 1}/{epochs}: {metrics} | skipped_updates: {skipped_updates}")
 
         if sample_counts:
             counts = ", ".join(
@@ -459,7 +508,6 @@ class Train:
                 for kind in ("positive", "absent", "outside")
             )
             self.logger.log(f"Epoch {epoch + 1} search windows: {counts}")
-        return average_loss, gradient_norms, clipped_steps, clipped_steps_percent, p95_grad_norm
 
     def train(self):
         epochs = self.config.training.epochs
@@ -489,26 +537,16 @@ class Train:
         for i in range(self.start_epoch, epochs):
             patience_counter += 1
 
-            average_loss, gradient_norms, clipped_steps, clipped_steps_percent, p95_grad_norm = (
-                self._run_training_epoch(train_loader, scheduler, i, epochs)
-            )
+            self._run_training_epoch(train_loader, scheduler, i, epochs)
 
             val_loss, bce_loss, dice_loss = self.get_valid_loss(valid_loader)
 
-            self.logger.log(
-                f"epoch {i + 1}/{epochs}: loss: {average_loss:.3f} | "
-                f"max_grad_norm: {max(gradient_norms):.3f} | "
-                f"p95_grad_norm: {p95_grad_norm:.3f} | "
-                f"clipped_steps: {clipped_steps}/{len(gradient_norms)} "
-                f"({clipped_steps_percent:.1f}%)"
-            )
             self.logger.log(f"valid_loss: {val_loss:.5f} | BCE: {bce_loss:.5f} | Dice: {dice_loss:.5f}")
 
             if val_loss < best_metric:
                 patience_counter = 0
                 best_metric = val_loss
-                self.model.save_checkpoint(
-                    self.optimizer,
+                self._save_checkpoint(
                     scheduler,
                     i,
                     best_metric,
@@ -518,8 +556,7 @@ class Train:
 
                 self.logger.log(f"Saved best: {best_metric:.3f} ({metric})")
 
-            self.model.save_checkpoint(
-                self.optimizer,
+            self._save_checkpoint(
                 scheduler,
                 i,
                 best_metric,

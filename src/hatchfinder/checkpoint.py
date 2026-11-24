@@ -20,7 +20,8 @@ def model_state_dict(data: object) -> dict[str, torch.Tensor]:
     raise ValueError("The .pt file does not contain a model state_dict")
 
 
-def save_checkpoint(model, optimizer, scheduler, epoch, best_metric, patience_counter, path):
+def save_checkpoint(model, optimizer, scheduler, epoch, best_metric, patience_counter, path, *,
+                    consecutive_skipped_updates=0):
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -29,6 +30,7 @@ def save_checkpoint(model, optimizer, scheduler, epoch, best_metric, patience_co
             "epoch": epoch,
             "best_metric": best_metric,
             "patience_counter": patience_counter,
+            "consecutive_skipped_updates": consecutive_skipped_updates,
             "config": model.config.model_dump(mode="json"),
             "format_version": PT_FORMAT_VERSION,
         },
@@ -37,6 +39,10 @@ def save_checkpoint(model, optimizer, scheduler, epoch, best_metric, patience_co
 
 
 def load_checkpoint(model, optimizer, scheduler, path) -> tuple[int, float, int]:
+    return restore_training_checkpoint(model, optimizer, scheduler, path)[:3]
+
+
+def restore_training_checkpoint(model, optimizer, scheduler, path) -> tuple[int, float, int, int]:
     checkpoint = torch.load(path, map_location=model.device, weights_only=True)
     checkpoint_config = checkpoint.get("config")
     if checkpoint_config is not None:
@@ -53,6 +59,7 @@ def load_checkpoint(model, optimizer, scheduler, path) -> tuple[int, float, int]
         checkpoint["epoch"] + 1,
         checkpoint["best_metric"],
         checkpoint["patience_counter"],
+        checkpoint.get("consecutive_skipped_updates", 0),
     )
 
 

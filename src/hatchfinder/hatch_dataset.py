@@ -22,6 +22,8 @@ class HatchDataset(Dataset):
         data_config: DataSettings,
         augmentation_config: AugmentationSettings,
         augment: bool = False,
+        *,
+        include_sample_ids: bool = False,
     ):
         if dataset_type not in {"train", "valid"}:
             raise ValueError("dataset_type must be 'train' or 'valid'")
@@ -33,6 +35,7 @@ class HatchDataset(Dataset):
         self.split = dataset_type
         self.generation = data_config.search_mask_generation
         self.augment = augment and dataset_type == "train"
+        self.include_sample_ids = include_sample_ids
         self._augmentation = None
         self._augmentation_worker_id = None
         self._window_rng = None
@@ -44,6 +47,8 @@ class HatchDataset(Dataset):
                 item = json.loads(line)
                 entry = {name: item[name] for name in ("drawing", "hatch", "target")}
                 entry["search_mask"] = item.get("search_mask")
+                if include_sample_ids:
+                    entry["id"] = item.get("id")
                 if not entry["search_mask"] and not self.generation.enabled:
                     raise ValueError(f"Missing search_mask for {entry['drawing']}. Supply a saved mask or "
                                      "enable data.search_mask_generation with a whole-tile target.")
@@ -187,6 +192,10 @@ class HatchDataset(Dataset):
         }
         if rng is not None and self.split == "train":
             result["sample_kind"] = kind
+        if self.include_sample_ids:
+            result["sample_id"] = item["id"] if item["id"] is not None else (
+                f"{self.split}/manifest.jsonl:{index + 1} ({item['target']})"
+            )
         return result
 
     def pad_tensor(
@@ -267,4 +276,6 @@ class HatchDataset(Dataset):
         sample_kinds = [item["sample_kind"] for item in batch if "sample_kind" in item]
         if sample_kinds:
             result["sample_kind"] = sample_kinds
+        if self.include_sample_ids:
+            result["sample_ids"] = [item["sample_id"] for item in batch]
         return result

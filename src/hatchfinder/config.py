@@ -301,6 +301,7 @@ class TrainingSettings(StrictModel):
     epochs: int = Field(default=150, gt=0)
     batch_size: int = Field(default=1, gt=0)
     gradient_accumulation_steps: int = Field(default=16, gt=0)
+    max_consecutive_skipped_updates: int = Field(default=0, ge=0, strict=True)
     patience: int = Field(default=8, gt=0)
     num_workers: int = Field(default=4, ge=0)
     metric: Literal["val_loss"] = "val_loss"

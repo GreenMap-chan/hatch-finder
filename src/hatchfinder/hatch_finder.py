@@ -293,9 +293,12 @@ class HatchFinder(nn.Module):
         best_metric: float,
         patience_counter: int,
         path: Path = Path("runs/checkpoint.pt"),
+        *,
+        consecutive_skipped_updates: int = 0,
     ):
         checkpoint.save_checkpoint(
-            self, optimizer, scheduler, epoch, best_metric, patience_counter, path
+            self, optimizer, scheduler, epoch, best_metric, patience_counter, path,
+            consecutive_skipped_updates=consecutive_skipped_updates,
         )
 
     def load_checkpoint(self, optimizer, scheduler, path: Path) -> tuple[int, float, int]:
