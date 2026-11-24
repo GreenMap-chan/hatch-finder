@@ -299,6 +299,7 @@ class TrainingSettings(StrictModel):
     tversky_fp_weight: float = Field(default=0.3, ge=0.0, le=1.0)
     tversky_fn_weight: float = Field(default=0.7, ge=0.0, le=1.0)
     epochs: int = Field(default=150, gt=0)
+    validation_interval: float = Field(default=1.0, gt=0, le=1, strict=True)
     batch_size: int = Field(default=1, gt=0)
     gradient_accumulation_steps: int = Field(default=16, gt=0)
     max_consecutive_skipped_updates: int = Field(default=0, ge=0, strict=True)

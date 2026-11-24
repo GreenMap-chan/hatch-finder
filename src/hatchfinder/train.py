@@ -2,6 +2,7 @@ from .hatch_finder import HatchFinder
 from .logger import Logger
 
 from collections import Counter
+from fractions import Fraction
 import json
 import torch
 import math
@@ -16,7 +17,7 @@ from .checkpoint import restore_training_checkpoint
 from .hatch_dataset import HatchDataset
 from .image_geometry import canvas_size
 from . import losses
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler
 
 
 class _Unset:
@@ -24,6 +25,31 @@ class _Unset:
 
 
 UNSET = _Unset()
+
+
+class _EpochSampler(RandomSampler):
+    """Capture the shuffle RNG after DataLoader has seeded its workers."""
+
+    epoch_start_state = None
+    resume_state = None
+
+    def __iter__(self):
+        if self.resume_state is not None:
+            self.generator.set_state(self.resume_state.cpu())
+            self.resume_state = None
+        self.epoch_start_state = self.generator.get_state()
+        yield from super().__iter__()
+
+
+def _intermediate_validation_batches(batch_count: int, accumulation: int, interval: float) -> set[int]:
+    if interval == 1 or batch_count == 0:
+        return set()
+    # Compare exact multiples of the configured fraction, even for very small intervals.
+    spacing = batch_count * Fraction(str(interval))
+    return {
+        end for end in range(accumulation, batch_count, accumulation)
+        if end // spacing > (end - accumulation) // spacing
+    }
 
 
 class Train:
@@ -48,6 +74,7 @@ class Train:
             raise ValueError("Pixel correlation requires batch_size=1; use gradient accumulation")
         self.config = config
         self.start_epoch = 0
+        self.resume_progress = None
         self.consecutive_skipped_updates = 0
         transfer = config.training.load_new_model_config
         self.checkpoint_path = None if transfer else config.training.checkpoint_path
@@ -95,11 +122,8 @@ class Train:
         else:
             config = config.model_copy(deep=True)
 
-        epochs_specified = "epochs" in config.training.model_fields_set or "epochs" in training_overrides
-        skip_limit_specified = (
-            "max_consecutive_skipped_updates" in config.training.model_fields_set
-            or "max_consecutive_skipped_updates" in training_overrides
-        )
+        resumable_settings = {"epochs", "max_consecutive_skipped_updates", "validation_interval"}
+        resume_overrides = resumable_settings & (config.training.model_fields_set | training_overrides.keys())
         output_specified = "directory" in config.output.model_fields_set or not isinstance(output_path, _Unset)
         dataset_specified = "dataset" in config.data.model_fields_set or not isinstance(dataset_path, _Unset)
         device_specified = "device" in config.runtime.model_fields_set or not isinstance(device, _Unset)
@@ -141,9 +165,8 @@ class Train:
             ))
             return config, False
         if checkpoint_path is not None:
-            unsupported_overrides = set(training_overrides) - {
-                "checkpoint_path", "epochs", "load_new_model_config", "max_consecutive_skipped_updates",
-            }
+            allowed_overrides = resumable_settings | {"checkpoint_path", "load_new_model_config"}
+            unsupported_overrides = training_overrides.keys() - allowed_overrides
             if unsupported_overrides:
                 raise ValueError(
                     "Training settings cannot be overridden when resuming: "
@@ -160,15 +183,10 @@ class Train:
                 checkpoint_config = Config()
             # This invocation is an ordinary resume, even if its source was an experiment.
             checkpoint_config.training.load_new_model_config = False
-            if skip_limit_specified:
-                checkpoint_config.training.max_consecutive_skipped_updates = (
-                    config.training.max_consecutive_skipped_updates
-                )
-
-            if epochs_specified:
+            if resume_overrides:
                 checkpoint_config.training = type(checkpoint_config.training).model_validate({
                     **checkpoint_config.training.model_dump(),
-                    "epochs": config.training.epochs,
+                    **config.training.model_dump(include=resume_overrides),
                 })
             if output_specified:
                 checkpoint_config.output.directory = config.output.directory
@@ -360,7 +378,7 @@ class Train:
         train_loader = DataLoader(
             dataset_train,
             batch_size=self.config.training.batch_size,
-            shuffle=True,
+            sampler=_EpochSampler(dataset_train, generator=self.data_loader_generator),
             num_workers=num_workers,
             persistent_workers=num_workers > 0,
             pin_memory=self.model.device.type == "cuda",
@@ -388,18 +406,19 @@ class Train:
     def _restore_training(self, scheduler, total_steps: int, warmup_steps: int):
         if self.checkpoint_path is None:
             return None, 0
-        self.start_epoch, best_metric, patience_counter, self.consecutive_skipped_updates = restore_training_checkpoint(
-            self.model, self.optimizer, scheduler, self.checkpoint_path
-        )
+        state = restore_training_checkpoint(self.model, self.optimizer, scheduler, self.checkpoint_path,
+                                            include_progress=True)
+        self.start_epoch, best_metric, patience_counter, self.consecutive_skipped_updates, self.resume_progress = state
         self.extend_scheduler(total_steps, warmup_steps)
         if self.dataset_changed:
+            self.resume_progress = None
             return None, 0
         return best_metric, patience_counter
 
-    def _save_checkpoint(self, scheduler, epoch, best_metric, patience_counter, path):
+    def _save_checkpoint(self, scheduler, epoch, best_metric, patience_counter, path, epoch_progress=None):
         self.model.save_checkpoint(
             self.optimizer, scheduler, epoch, best_metric, patience_counter, path,
-            consecutive_skipped_updates=self.consecutive_skipped_updates,
+            consecutive_skipped_updates=self.consecutive_skipped_updates, epoch_progress=epoch_progress,
         )
 
     def _ensure_best_checkpoint(self, scheduler, best_metric, val_loss: float) -> float:
@@ -414,10 +433,12 @@ class Train:
                 shutil.copy2(previous_best, best_path)
             else:
                 best_metric = val_loss
-                self._save_checkpoint(scheduler, self.start_epoch - 1, best_metric, 0, best_path)
+                epoch = self.start_epoch if self.resume_progress else self.start_epoch - 1
+                self._save_checkpoint(scheduler, epoch, best_metric, 0, best_path, self.resume_progress)
         return best_metric
 
-    def _run_training_epoch(self, train_loader: DataLoader, scheduler, epoch: int, epochs: int):
+    def _run_training_epoch(self, train_loader: DataLoader, scheduler, epoch: int, epochs: int, *,
+                            start_batch=0, validation_batches=(), validate=None):
         train_dataset_length = len(train_loader.dataset)
         train_batches_count = len(train_loader)
         gradient_accum_steps = self.config.training.gradient_accumulation_steps
@@ -430,7 +451,15 @@ class Train:
         trained_examples = 0
         skipped_updates = 0
         self.optimizer.zero_grad()
-        for batch_num, example in enumerate(tqdm(train_loader, desc=f"epoch {epoch + 1}/{epochs}", unit="batch")):
+
+        def remaining_batches():
+            for index, batch in enumerate(tqdm(train_loader, desc=f"epoch {epoch + 1}/{epochs}", unit="batch")):
+                if index >= start_batch:
+                    yield index, batch
+                    if index + 1 in validation_batches:
+                        validate(epoch, index + 1)
+
+        for batch_num, example in remaining_batches():
             current_batch_size = example["drawing"].shape[0]
             sample_counts.update(example.get("sample_kind", ()))
 
@@ -453,10 +482,11 @@ class Train:
             batch_ids = example["sample_ids"]
             group_ids.extend(batch_ids)
             with self.autocast_context():
-                example_loss, _, _ = self.train_one_example(example)
+                example_loss = self.train_one_example(example)[0]
 
             loss_value = example_loss.detach().item()
             if not math.isfinite(loss_value):
+                del example_loss
                 problem = f"non-finite loss={loss_value}, batch sample IDs={batch_ids}"
             else:
                 group_loss += loss_value * current_batch_size
@@ -500,7 +530,8 @@ class Train:
             )
         else:
             metrics = "loss: n/a (no successful updates)"
-        self.logger.log(f"epoch {epoch + 1}/{epochs}: {metrics} | skipped_updates: {skipped_updates}")
+        part = f" (batches {start_batch + 1}-{train_batches_count})" if start_batch else ""
+        self.logger.log(f"epoch {epoch + 1}/{epochs}{part}: {metrics} | skipped_updates: {skipped_updates}")
 
         if sample_counts:
             counts = ", ".join(
@@ -520,13 +551,20 @@ class Train:
 
         train_loader, valid_loader = self._create_loaders()
 
-        epoch_steps = math.ceil(len(train_loader) / gradient_accum_steps)
+        batch_count = len(train_loader)
+        validation_batches = _intermediate_validation_batches(
+            batch_count, gradient_accum_steps, self.config.training.validation_interval
+        )
+        epoch_steps = math.ceil(batch_count / gradient_accum_steps)
         total_steps = epoch_steps * epochs
         scheduler = self.create_scheduler(total_steps, warmup_epochs * epoch_steps)
 
         best_metric, patience_counter = self._restore_training(
             scheduler, total_steps, warmup_epochs * epoch_steps
         )
+        if self.resume_progress and self.resume_progress["batch_count"] != batch_count:
+            self.logger.log("Training loader length changed. Restarting the partial epoch at its first batch.")
+            self.resume_progress = None
         # Workers inherit this before the first training batch, also on resume.
         train_loader.dataset.window_start_epoch = self.start_epoch
         val_loss, bce_loss, dice_loss = self.get_valid_loss(valid_loader)
@@ -534,28 +572,53 @@ class Train:
 
         self.logger.log(f"Initials metrics - valid_loss: {val_loss:.5f} | BCE: {bce_loss:.5f} | Dice: {dice_loss:.5f}")
 
-        for i in range(self.start_epoch, epochs):
-            patience_counter += 1
+        start_batch = 0
+        if self.resume_progress:
+            progress = self.resume_progress
+            start_batch = progress["batches_completed"]
+            train_loader.sampler.resume_state = progress["shuffle_state"]
+            train_loader.dataset.window_start_epoch = progress["window_start_epoch"]
+            torch.set_rng_state(progress["torch_rng_state"].cpu())
+            if self.model.device.type == "cuda" and "cuda_rng_state" in progress:
+                torch.cuda.set_rng_state(progress["cuda_rng_state"].cpu(), self.model.device)
+            self.logger.log(f"Resuming epoch {self.start_epoch + 1}/{epochs} at batch {start_batch + 1}/{batch_count}")
 
-            self._run_training_epoch(train_loader, scheduler, i, epochs)
-
-            val_loss, bce_loss, dice_loss = self.get_valid_loss(valid_loader)
-
-            self.logger.log(f"valid_loss: {val_loss:.5f} | BCE: {bce_loss:.5f} | Dice: {dice_loss:.5f}")
+        def validate(epoch, completed_batches):
+            nonlocal best_metric, patience_counter
+            intermediate = completed_batches < batch_count
+            # An extra validation iterator consumes a CPU RNG draw for worker seeds.
+            with torch.random.fork_rng(devices=[], enabled=intermediate):
+                val_loss, bce_loss, dice_loss = self.get_valid_loss(valid_loader)
+            position = ""
+            if validation_batches:
+                position = f"epoch {epoch + 1}/{epochs}, batch {completed_batches}/{batch_count} | "
+            self.logger.log(f"{position}valid_loss: {val_loss:.5f} | BCE: {bce_loss:.5f} | Dice: {dice_loss:.5f}")
 
             if val_loss < best_metric:
                 patience_counter = 0
                 best_metric = val_loss
-                self._save_checkpoint(
-                    scheduler,
-                    i,
-                    best_metric,
-                    patience_counter,
-                    self.output_path / "best.pt",
-                )
-
+                progress = None
+                if intermediate:
+                    progress = {
+                        "batches_completed": completed_batches,
+                        "batch_count": batch_count,
+                        "shuffle_state": train_loader.sampler.epoch_start_state,
+                        "window_start_epoch": train_loader.dataset.window_start_epoch,
+                        "torch_rng_state": torch.get_rng_state(),
+                    }
+                    if self.model.device.type == "cuda":
+                        progress["cuda_rng_state"] = torch.cuda.get_rng_state(self.model.device)
+                self._save_checkpoint(scheduler, epoch, best_metric, patience_counter,
+                                      self.output_path / "best.pt", progress)
                 self.logger.log(f"Saved best: {best_metric:.3f} ({metric})")
 
+        for i in range(self.start_epoch, epochs):
+            if not start_batch:
+                patience_counter += 1
+            self._run_training_epoch(train_loader, scheduler, i, epochs, start_batch=start_batch,
+                                     validation_batches=validation_batches, validate=validate)
+            validate(i, batch_count)
+            start_batch = 0
             self._save_checkpoint(
                 scheduler,
                 i,

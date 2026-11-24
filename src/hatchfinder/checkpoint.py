@@ -21,13 +21,14 @@ def model_state_dict(data: object) -> dict[str, torch.Tensor]:
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, best_metric, patience_counter, path, *,
-                    consecutive_skipped_updates=0):
+                    consecutive_skipped_updates=0, epoch_progress=None):
     torch.save(
         {
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "epoch": epoch,
+            "epoch_progress": epoch_progress,
             "best_metric": best_metric,
             "patience_counter": patience_counter,
             "consecutive_skipped_updates": consecutive_skipped_updates,
@@ -42,7 +43,7 @@ def load_checkpoint(model, optimizer, scheduler, path) -> tuple[int, float, int]
     return restore_training_checkpoint(model, optimizer, scheduler, path)[:3]
 
 
-def restore_training_checkpoint(model, optimizer, scheduler, path) -> tuple[int, float, int, int]:
+def restore_training_checkpoint(model, optimizer, scheduler, path, *, include_progress=False):
     checkpoint = torch.load(path, map_location=model.device, weights_only=True)
     checkpoint_config = checkpoint.get("config")
     if checkpoint_config is not None:
@@ -55,12 +56,14 @@ def restore_training_checkpoint(model, optimizer, scheduler, path) -> tuple[int,
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     if scheduler:
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-    return (
-        checkpoint["epoch"] + 1,
+    progress = checkpoint.get("epoch_progress")
+    state = (
+        checkpoint["epoch"] if progress else checkpoint["epoch"] + 1,
         checkpoint["best_metric"],
         checkpoint["patience_counter"],
         checkpoint.get("consecutive_skipped_updates", 0),
     )
+    return (*state, progress) if include_progress else state
 
 
 def save_weights(model, path: Path):

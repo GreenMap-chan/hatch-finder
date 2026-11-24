@@ -54,6 +54,7 @@ training:
   # tversky_fp_weight: 0.3
   # tversky_fn_weight: 0.7
   epochs: 150
+  validation_interval: 1.0  # Fraction of each epoch. Use 0.5 for halfway and epoch end.
 
   batch_size: 1
   gradient_accumulation_steps: 16
