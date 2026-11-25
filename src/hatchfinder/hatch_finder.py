@@ -12,6 +12,7 @@ from .drawing_encoder import DrawingEncoder
 from .output_comparison import OutputComparison
 from .heatmap_decoder import HeatmapDecoder
 from .pixel_correlation import PixelCorrelation
+from .cross_attention import CrossAttention
 from .config import Config, model_config_from_pt_data
 from . import checkpoint
 from . import inference, losses
@@ -92,6 +93,17 @@ class HatchFinder(nn.Module):
             if match_dim > 0
         })
 
+        self.cross_attention = nn.ModuleDict({
+            str(settings.level): CrossAttention(
+                hatch_channels=model_config.hatch_channels[settings.level],
+                match_dim=model_config.match_dims[settings.level],
+                output_dim=model_config.match_feature_dims[settings.level],
+                pool_size=model_config.hatch_pool_sizes[settings.level],
+                settings=settings,
+            )
+            for settings in model_config.cross_attention
+        })
+
         self.pixel_correlation = (
             PixelCorrelation(model_config.pixel_correlation)
             if model_config.pixel_correlation.enabled else None
@@ -155,6 +167,7 @@ class HatchFinder(nn.Module):
 
         drawing_vectors = [None] * len(drawing_features)
         hatch_vectors = [None] * len(drawing_features)
+        pooled_hatches = {}
 
         for level, feature in enumerate(hatch_features):
             key = str(level)
@@ -169,6 +182,8 @@ class HatchFinder(nn.Module):
             hatch_vectors[level] = self.hatch_projections[key](
                 pooled_feature.flatten(1)
             )
+            if key in self.cross_attention:
+                pooled_hatches[key] = pooled_feature
 
         for level, features in enumerate(drawing_features):
             key = str(level)
@@ -177,7 +192,11 @@ class HatchFinder(nn.Module):
 
             drawing_vectors[level] = self.drawing_projections[key](features)
 
-        return drawing_vectors, hatch_vectors
+        local_matching = {
+            key: branch(drawing_vectors[int(key)], pooled_hatches[key])
+            for key, branch in self.cross_attention.items()
+        }
+        return drawing_vectors, hatch_vectors, local_matching
 
     def convert_images_to_tensors(self, drawing: Image.Image, mask: Image.Image, hatch: Image.Image):
         return inference.convert_images_to_tensors(self, drawing, mask, hatch)
@@ -194,12 +213,15 @@ class HatchFinder(nn.Module):
         hatch = hatch.to(device, non_blocking=True)
 
         drawing_features = self.drawing_encoder(drawing, mask)
-        drawing_vectors, hatch_vectors = self._get_vectors(drawing_features, hatch)
+        drawing_vectors, hatch_vectors, local_matching = self._get_vectors(drawing_features, hatch)
 
         matching_map = self.output_comparison(
             drawing_vectors,
             hatch_vectors,
         )
+        for key, correction in local_matching.items():
+            level = int(key)
+            matching_map[level] = matching_map[level] + correction
 
         logits = self.heatmap_decoder(
             matching_map,
@@ -218,8 +240,17 @@ class HatchFinder(nn.Module):
         hatch: Image.Image | Path,
         debug_path: Path | None = None,
         confidence: float | None = None,
-    ):
-        return inference.infer(self, drawing, mask, hatch, debug_path, confidence)
+        *,
+        imgsz: int | tuple[int, int] | None = None,
+        rect: bool = True,
+    ) -> torch.Tensor:
+        """Fit the inputs to imgsz and return probabilities at the original drawing size.
+
+        A pair specifies (height, width). With rect=False the drawing and search
+        mask are centered on that canvas. With imgsz=None all inputs keep their size.
+        """
+        return inference.infer(self, drawing, mask, hatch, debug_path, confidence,
+                               imgsz=imgsz, rect=rect)
 
     @staticmethod
     def _save_inference_debug(
@@ -262,9 +293,13 @@ class HatchFinder(nn.Module):
         best_metric: float,
         patience_counter: int,
         path: Path = Path("runs/checkpoint.pt"),
+        *,
+        consecutive_skipped_updates: int = 0,
+        epoch_progress: dict | None = None,
     ):
         checkpoint.save_checkpoint(
-            self, optimizer, scheduler, epoch, best_metric, patience_counter, path
+            self, optimizer, scheduler, epoch, best_metric, patience_counter, path,
+            consecutive_skipped_updates=consecutive_skipped_updates, epoch_progress=epoch_progress,
         )
 
     def load_checkpoint(self, optimizer, scheduler, path: Path) -> tuple[int, float, int]:

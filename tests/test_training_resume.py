@@ -9,7 +9,7 @@ import torch
 from PIL import Image
 
 from hatchfinder import HatchFinder, Train, load_config
-from hatchfinder.config import ModelSettings, TransformerSettings
+from hatchfinder.config import DataSettings, ModelSettings, TransformerSettings, config_from_pt_data
 
 
 class FineTuningDropoutTests(unittest.TestCase):
@@ -93,6 +93,18 @@ class FineTuningDropoutTests(unittest.TestCase):
 
 
 class TrainingCheckpointTests(unittest.TestCase):
+    def test_legacy_padding_setting_is_ignored_in_yaml_and_checkpoints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.yaml"
+            path.write_text("data:\n  drawing_pad_multiple: 64\n  load_dataset_examples: 3\n", encoding="utf-8")
+            config = load_config(path)
+            legacy = {"config": {"data": {"drawing_pad_multiple": 64, "load_dataset_examples": 3}}}
+            restored = config_from_pt_data(legacy)
+            self.assertEqual(restored.data, config.data)
+            self.assertEqual(config.data.load_dataset_examples, 3)
+            self.assertNotIn("drawing_pad_multiple", config.data.model_dump())
+            self.assertNotIn("drawing_pad_multiple", DataSettings.model_json_schema()["properties"])
+
     def test_new_runs_get_unique_directories_but_resume_reuses_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory) / "run"
@@ -137,7 +149,6 @@ class TrainingCheckpointTests(unittest.TestCase):
 
             config = load_config(Path(__file__).resolve().parents[1] / "examples" / "smoke_test.yaml")
             config.data.dataset = dataset
-            config.data.drawing_pad_multiple = 16
             config.augmentation.enabled = False
             config.output.directory = root / "first"
             trainer = Train(config)

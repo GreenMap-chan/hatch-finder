@@ -1,0 +1,317 @@
+import json
+import tempfile
+import unittest
+from unittest.mock import patch
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+from pydantic import ValidationError
+
+from hatchfinder.augmentation import TrainingAugmentation
+from hatchfinder.config import AugmentationSettings, Config, DataSettings
+from hatchfinder.hatch_dataset import HatchDataset
+
+
+class ResizeAugmentationTests(unittest.TestCase):
+    def config(self, **overrides):
+        values = dict(
+            horizontal_flip_probability=0, vertical_flip_probability=0,
+            rotate_90_probability=0,
+            affine_probability=0, brightness_probability=0, contrast_probability=0,
+            gamma_probability=0, blur_probability=0, noise_probability=0,
+        )
+        return AugmentationSettings(**(values | overrides))
+
+    def inputs(self):
+        rgb = np.full((16, 24, 3), 255, dtype=np.uint8)
+        rgb[3:10, 4:12] = 0
+        target = np.zeros((16, 24), dtype=np.uint8)
+        target[3:10, 4:12] = 255
+        images = (Image.fromarray(rgb), Image.new("L", (24, 16), 255),
+                  Image.fromarray(rgb), Image.fromarray(target))
+        for image in images:
+            self.addCleanup(image.close)
+        return images
+
+    def augment(self, config, inputs):
+        result = TrainingAugmentation(config)(*inputs)
+        for image in result:
+            self.addCleanup(image.close)
+        return result
+
+    def test_nearest_resize_changes_canvas_without_cropping_and_keeps_masks_aligned(self):
+        inputs = self.inputs()
+        result = self.augment(self.config(
+            drawing=dict(resize_probability=1, resize_scale_min=2, resize_scale_max=2),
+            hatch=dict(resize_probability=1, resize_scale_min=0.5, resize_scale_max=0.5),
+        ), inputs)
+        for i in (0, 1, 3):
+            self.assertEqual(result[i].size, (48, 32))
+            expected = np.repeat(np.repeat(np.array(inputs[i]), 2, axis=0), 2, axis=1)
+            np.testing.assert_array_equal(np.array(result[i]), expected)
+        self.assertEqual(result[2].size, (12, 8))
+        self.assertEqual(inputs[0].size, (24, 16))
+        self.assertEqual(inputs[0].getpixel((0, 0)), (255, 255, 255))
+
+    def test_hatch_only_resize_matches_service_rounding(self):
+        inputs = list(self.inputs())
+        inputs[2] = Image.fromarray(np.random.default_rng(0).integers(
+            0, 256, (148, 38, 3), dtype=np.uint8))
+        self.addCleanup(inputs[2].close)
+        result = self.augment(self.config(hatch=dict(
+            resize_probability=1, resize_scale_min=0.365, resize_scale_max=0.365,
+            resize_interpolation="nearest",
+        )), inputs)
+        self.assertEqual(result[2].size, (14, 54))
+        with inputs[2].resize((14, 54), Image.Resampling.NEAREST) as expected:
+            np.testing.assert_array_equal(np.array(result[2]), np.array(expected))
+        for i in (0, 1, 3):
+            np.testing.assert_array_equal(np.array(result[i]), np.array(inputs[i]))
+
+    def test_interpolation_changes_rgb_but_masks_stay_binary(self):
+        inputs = self.inputs()
+        for interpolation in ("bilinear", "bicubic", "lanczos"):
+            with self.subTest(interpolation=interpolation):
+                result = self.augment(self.config(drawing=dict(
+                    resize_probability=1, resize_scale_min=2, resize_scale_max=2,
+                    resize_interpolation=interpolation,
+                )), inputs)
+                rgb = np.array(result[0])
+                self.assertTrue(((rgb > 0) & (rgb < 255)).any())
+                for i in (1, 3):
+                    expected = np.repeat(np.repeat(np.array(inputs[i]), 2, axis=0), 2, axis=1)
+                    np.testing.assert_array_equal(np.array(result[i]), expected)
+
+    def test_shared_resize_and_partial_overrides_survive_serialization(self):
+        config = self.config(
+            resize_probability=1, resize_scale_min=2, resize_scale_max=2,
+            resize_interpolation="bicubic", hatch={"resize_probability": 0},
+        )
+        config = Config.model_validate_json(Config(augmentation=config).model_dump_json()).augmentation
+        self.assertEqual(config.for_branch("hatch").resize_interpolation, "bicubic")
+        result = self.augment(config, self.inputs())
+        self.assertEqual(result[0].size, (48, 32))
+        self.assertEqual(result[2].size, (24, 16))
+        # The shared configuration also works without either branch mapping.
+        result = self.augment(self.config(
+            resize_probability=1, resize_scale_min=2, resize_scale_max=2,
+        ), self.inputs())
+        self.assertEqual([im.size for im in result], [(48, 32)] * 4)
+
+    def test_random_interpolation_shares_filter_and_keeps_masks_nearest(self):
+        inputs = self.inputs()
+        config = self.config(resize_probability=1, resize_scale_min=1.5,
+                             resize_scale_max=1.5, resize_interpolation="random")
+        aug = TrainingAugmentation(config)
+        for name in ("nearest", "bilinear", "bicubic", "lanczos"):
+            with self.subTest(filter=name), patch.object(aug.random, "choice", return_value=name) as choice:
+                result = aug(*inputs)
+                choice.assert_called_once_with(("nearest", "bilinear", "bicubic", "lanczos"))
+                for i, image in enumerate(result):
+                    self.addCleanup(image.close)
+                    mode = getattr(Image.Resampling, name.upper()) if i in (0, 2) else Image.Resampling.NEAREST
+                    with inputs[i].resize((36, 24), mode) as expected:
+                        np.testing.assert_array_equal(np.array(image), np.array(expected))
+
+    def test_random_interpolation_branch_override_selects_independent_filters(self):
+        inputs = self.inputs()
+        config = self.config(resize_probability=1, resize_scale_min=1.5,
+                             resize_scale_max=1.5, resize_interpolation="random",
+                             hatch={"resize_interpolation": "random"})
+        config = Config.model_validate_json(Config(augmentation=config).model_dump_json()).augmentation
+        self.assertEqual(config.for_branch("hatch").resize_interpolation, "random")
+        aug = TrainingAugmentation(config)
+        with patch.object(aug.random, "choice", side_effect=["nearest", "bicubic"]) as choice:
+            result = aug(*inputs)
+            self.assertEqual(choice.call_count, 2)
+        for image in result:
+            self.addCleanup(image.close)
+        for i, mode in ((0, Image.Resampling.NEAREST), (2, Image.Resampling.BICUBIC)):
+            with inputs[i].resize((36, 24), mode) as expected:
+                np.testing.assert_array_equal(np.array(result[i]), np.array(expected))
+
+    def test_random_interpolation_is_reproducible_and_covers_all_filters(self):
+        config = self.config(resize_probability=1, resize_scale_min=1.5,
+                             resize_scale_max=1.5, resize_interpolation="random")
+        left, right = TrainingAugmentation(config), TrainingAugmentation(config)
+        inputs = self.inputs()
+        seen = set()
+        with patch.object(left.random, "choice", wraps=left.random.choice) as choice:
+            for _ in range(24):
+                a, b = left(*inputs), right(*inputs)
+                for x, y in zip(a, b):
+                    self.addCleanup(x.close)
+                    self.addCleanup(y.close)
+                    np.testing.assert_array_equal(np.array(x), np.array(y))
+                seen.add(a[0].tobytes())
+            self.assertEqual(choice.call_count, 24)
+        self.assertEqual(len(seen), 4)
+
+    def test_skipped_random_resize_does_not_choose_filter(self):
+        for overrides in ({"resize_probability": 0}, {"resize_min_side": 100}):
+            config = self.config(resize_probability=1, resize_scale_max=2,
+                                 resize_interpolation="random")
+            config = config.model_copy(update=overrides)
+            aug = TrainingAugmentation(config)
+            with patch.object(aug.random, "choice", wraps=aug.random.choice) as choice:
+                result = aug(*self.inputs())
+                choice.assert_not_called()
+            for image in result:
+                self.addCleanup(image.close)
+
+    def test_disabled_resize_does_not_advance_random_stream(self):
+        inputs = self.inputs()
+        a = TrainingAugmentation(AugmentationSettings(seed=17))
+        b = TrainingAugmentation(AugmentationSettings(
+            seed=17, resize_probability=0, resize_scale_min=0.1, resize_scale_max=10,
+        ))
+        for _ in range(3):
+            left, right = a(*inputs), b(*inputs)
+            for x, y in zip(left, right):
+                self.addCleanup(x.close)
+                self.addCleanup(y.close)
+                np.testing.assert_array_equal(np.array(x), np.array(y))
+            self.assertEqual(a.random.getstate(), b.random.getstate())
+
+    def test_global_and_branch_disable_prevent_resize(self):
+        for overrides in ({"enabled": False}, {"drawing": {"enabled": False}, "hatch": {"enabled": False}}):
+            result = self.augment(self.config(
+                resize_probability=1, resize_scale_min=2, resize_scale_max=2, **overrides,
+            ), self.inputs())
+            self.assertEqual([im.size for im in result], [(24, 16)] * 4)
+
+    def test_tiny_hatch_is_clamped_to_one_pixel(self):
+        result = self.augment(self.config(hatch=dict(
+            resize_probability=1, resize_scale_min=0.001, resize_scale_max=0.001,
+        )), self.inputs())
+        self.assertEqual(result[2].size, (1, 1))
+
+    def test_minimum_side_adjusts_sampling_range_before_sampling(self):
+        inputs = self.inputs()  # Hatch is 24x16, so a 12px floor means scale >= .75.
+        aug = TrainingAugmentation(self.config(hatch=dict(
+            resize_probability=1, resize_scale_min=0.3, resize_scale_max=2,
+            resize_min_side=12,
+        )))
+        sizes = set()
+        with patch.object(aug.random, "uniform", wraps=aug.random.uniform) as sample:
+            for _ in range(20):
+                result = aug(*inputs)
+                for image in result:
+                    self.addCleanup(image.close)
+                sample.assert_called_with(0.75, 2)
+                sizes.add(result[2].size)
+                self.assertGreaterEqual(min(result[2].size), 12)
+                self.assertLessEqual(min(result[2].size), 32)
+                for i in (0, 1, 3):
+                    np.testing.assert_array_equal(np.array(result[i]), np.array(inputs[i]))
+        self.assertGreater(len(sizes), 5)
+
+    def test_impossible_minimum_skips_resize_without_exceeding_maximum(self):
+        inputs = self.inputs()
+        aug = TrainingAugmentation(self.config(
+            resize_probability=1, resize_scale_min=0.3, resize_scale_max=2,
+            resize_min_side=40,
+        ))
+        with patch.object(aug.random, "uniform", wraps=aug.random.uniform) as sample:
+            result = aug(*inputs)
+            sample.assert_not_called()
+        for before, after in zip(inputs, result):
+            self.addCleanup(after.close)
+            np.testing.assert_array_equal(np.array(before), np.array(after))
+
+    def test_minimum_equal_to_upper_bound_keeps_drawing_masks_aligned(self):
+        inputs = self.inputs()
+        result = self.augment(self.config(drawing=dict(
+            resize_probability=1, resize_scale_min=0.3, resize_scale_max=2,
+            resize_min_side=32,
+        )), inputs)
+        for i in (0, 1, 3):
+            expected = np.repeat(np.repeat(np.array(inputs[i]), 2, axis=0), 2, axis=1)
+            np.testing.assert_array_equal(np.array(result[i]), expected)
+        np.testing.assert_array_equal(np.array(result[2]), np.array(inputs[2]))
+
+    def test_minimum_side_inherits_and_can_be_overridden_after_serialization(self):
+        config = self.config(resize_min_side=16, drawing={}, hatch={"resize_min_side": 8})
+        restored = Config.model_validate_json(Config(augmentation=config).model_dump_json()).augmentation
+        self.assertEqual(restored.for_branch("drawing").resize_min_side, 16)
+        self.assertEqual(restored.for_branch("hatch").resize_min_side, 8)
+        config = self.config(resize_min_side=16, hatch={"resize_min_side": None})
+        self.assertEqual(config.for_branch("hatch").resize_min_side, 16)
+
+    def test_minimum_side_does_not_force_resize_when_disabled(self):
+        inputs = self.inputs()
+        result = self.augment(self.config(resize_probability=0, resize_min_side=100), inputs)
+        for before, after in zip(inputs, result):
+            np.testing.assert_array_equal(np.array(before), np.array(after))
+
+    def test_disappearing_positive_target_falls_back_to_original(self):
+        # The single center pixel misses this off-center target under nearest resize.
+        inputs = self.inputs()
+        result = self.augment(self.config(max_retries=2, drawing=dict(
+            resize_probability=1, resize_scale_min=0.001, resize_scale_max=0.001,
+        )), inputs)
+        for before, after in zip(inputs, result):
+            np.testing.assert_array_equal(np.array(before), np.array(after))
+
+    def test_invalid_settings_rejected(self):
+        for invalid in (
+            {"resize_probability": 1.1}, {"resize_probability": -1},
+            {"resize_scale_min": 0}, {"resize_scale_max": -1},
+            {"resize_scale_min": 2, "resize_scale_max": 1},
+            {"resize_scale_max": float("inf")}, {"resize_scale_min": float("nan")},
+            {"resize_interpolation": "unknown"},
+            {"resize_min_side": 0}, {"resize_min_side": -1}, {"resize_min_side": 1.5},
+        ):
+            for overrides in (invalid, {"hatch": invalid}, {"drawing": invalid}):
+                with self.subTest(overrides=overrides), self.assertRaises(ValidationError):
+                    self.config(**overrides)
+
+    def test_dataset_batches_resized_images_and_skips_validation_augmentation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = self.inputs()
+            names = ("drawing", "search_mask", "hatch", "target")
+            manifest = []
+            for index, size in enumerate(((24, 16), (18, 30))):
+                row = {}
+                for name, image in zip(names, inputs):
+                    filename = f"{index}_{name}.png"
+                    with image.resize(size, Image.Resampling.NEAREST) as resized:
+                        resized.save(root / filename)
+                    row[name] = filename
+                manifest.append(row)
+            for split in ("train", "valid"):
+                (root / split).mkdir()
+                (root / split / "manifest.jsonl").write_text(
+                    "\n".join(json.dumps(row) for row in manifest), encoding="utf-8")
+            config = self.config(
+                drawing=dict(resize_probability=1, resize_scale_min=2, resize_scale_max=2),
+                hatch=dict(resize_probability=1, resize_scale_min=0.5, resize_scale_max=0.5),
+            )
+            train = HatchDataset(root, "train", DataSettings(), config, augment=True)
+            items = [train[0], train[1]]
+            self.assertEqual(tuple(items[0]["drawing"].shape), (3, 32, 48))
+            single = train.collate_fn(items[:1])
+            for key in names:
+                self.assertTrue(single[key][0].equal(items[0][key]), key)
+            batch = train.collate_fn(items)
+            self.assertEqual(tuple(batch["drawing"].shape), (2, 3, 60, 48))
+            self.assertEqual(tuple(batch["hatch"].shape), (2, 3, 15, 12))
+            for key in ("search_mask", "target"):
+                self.assertEqual(tuple(batch[key].shape), (2, 1, 60, 48))
+            for index, item in enumerate(items):
+                for key in names:
+                    h, w = item[key].shape[-2:]
+                    padded = batch[key][index]
+                    self.assertTrue(padded[:, :h, :w].equal(item[key]), key)
+                    fill = 1 if key in ("drawing", "hatch") else 0
+                    self.assertTrue((padded[:, h:, :] == fill).all(), key)
+                    self.assertTrue((padded[:, :, w:] == fill).all(), key)
+            valid = HatchDataset(root, "valid", DataSettings(), config)
+            self.assertEqual(tuple(valid[0]["drawing"].shape), (3, 16, 24))
+            self.assertEqual(tuple(valid[0]["hatch"].shape), (3, 16, 24))
+
+
+if __name__ == "__main__":
+    unittest.main()

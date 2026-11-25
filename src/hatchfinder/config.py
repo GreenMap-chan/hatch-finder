@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import torch
 import yaml
@@ -7,10 +7,50 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 PT_FORMAT_VERSION = 1
+ResizeInterpolation = Literal["nearest", "bilinear", "bicubic", "lanczos", "random"]
+ImageSide = Annotated[int, Field(strict=True, gt=0)]
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class ImageAugmentationOverrides(StrictModel):
+    """None means inherit the shared augmentation setting."""
+
+    enabled: bool | None = None
+    horizontal_flip_probability: float | None = None
+    vertical_flip_probability: float | None = None
+    rotate_90_probability: float | None = None
+    affine_probability: float | None = None
+    affine_angle_degrees: float | None = None
+    affine_translate_percent: float | None = None
+    affine_scale_min: float | None = None
+    affine_scale_max: float | None = None
+    resize_probability: float | None = None
+    resize_scale_min: float | None = None
+    resize_scale_max: float | None = None
+    resize_min_side: int | None = None
+    resize_interpolation: ResizeInterpolation | None = None
+    brightness_probability: float | None = None
+    brightness_min: float | None = None
+    brightness_max: float | None = None
+    contrast_probability: float | None = None
+    contrast_min: float | None = None
+    contrast_max: float | None = None
+    gamma_probability: float | None = None
+    gamma_min: float | None = None
+    gamma_max: float | None = None
+    blur_probability: float | None = None
+    blur_kernel_size: int | None = None
+    blur_sigma_min: float | None = None
+    blur_sigma_max: float | None = None
+    noise_probability: float | None = None
+    noise_std_min: float | None = None
+    noise_std_max: float | None = None
+    color_overlay_probability: float | None = None
+    color_overlay_alpha_min: float | None = None
+    color_overlay_alpha_max: float | None = None
 
 
 class AugmentationSettings(StrictModel):
@@ -19,13 +59,17 @@ class AugmentationSettings(StrictModel):
     max_retries: int = Field(default=5, ge=1)
     horizontal_flip_probability: float = Field(default=0.5, ge=0.0, le=1.0)
     vertical_flip_probability: float = Field(default=0.5, ge=0.0, le=1.0)
-    drawing_rotate_90_probability: float = Field(default=0.75, ge=0.0, le=1.0)
-    hatch_rotate_90_probability: float = Field(default=0.75, ge=0.0, le=1.0)
+    rotate_90_probability: float = Field(default=0.75, ge=0.0, le=1.0)
     affine_probability: float = Field(default=0.5, ge=0.0, le=1.0)
     affine_angle_degrees: float = Field(default=2.0, ge=0.0)
     affine_translate_percent: float = Field(default=0.02, ge=0.0)
     affine_scale_min: float = Field(default=0.95, gt=0.0)
     affine_scale_max: float = Field(default=1.05, gt=0.0)
+    resize_probability: float = Field(default=0.0, ge=0.0, le=1.0)
+    resize_scale_min: float = Field(default=0.5, gt=0.0, allow_inf_nan=False)
+    resize_scale_max: float = Field(default=1.5, gt=0.0, allow_inf_nan=False)
+    resize_min_side: int = Field(default=1, ge=1)
+    resize_interpolation: ResizeInterpolation = "nearest"
     brightness_probability: float = Field(default=0.3, ge=0.0, le=1.0)
     brightness_min: float = Field(default=0.9, ge=0.0)
     brightness_max: float = Field(default=1.1, ge=0.0)
@@ -42,6 +86,56 @@ class AugmentationSettings(StrictModel):
     noise_probability: float = Field(default=0.2, ge=0.0, le=1.0)
     noise_std_min: float = Field(default=0.002, ge=0.0)
     noise_std_max: float = Field(default=0.015, ge=0.0)
+    color_overlay_probability: float = Field(default=0.0, ge=0.0, le=1.0)
+    color_overlay_alpha_min: float = Field(default=0.02, ge=0.0, le=1.0)
+    color_overlay_alpha_max: float = Field(default=0.15, ge=0.0, le=1.0)
+    drawing: ImageAugmentationOverrides | None = None
+    hatch: ImageAugmentationOverrides | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_rotation_settings(cls, data):
+        """Old per-input rotation names remain explicitly independent overrides."""
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        for branch in ("drawing", "hatch"):
+            key = f"{branch}_rotate_90_probability"
+            if key not in data:
+                continue
+            value = data.pop(key)
+            if value is None:
+                continue
+            overrides = data.get(branch)
+            if isinstance(overrides, ImageAugmentationOverrides):
+                overrides = overrides.model_dump(exclude_none=True)
+            if overrides is not None and not isinstance(overrides, dict):
+                raise ValueError(f"augmentation.{branch} must be a mapping")
+            overrides = dict(overrides or {})
+            existing = overrides.get("rotate_90_probability")
+            if existing is not None and existing != value:
+                raise ValueError(f"Conflicting {key} and {branch}.rotate_90_probability")
+            overrides["rotate_90_probability"] = value
+            data[branch] = overrides
+        return data
+
+    def independent_transform(self, branch: Literal["drawing", "hatch"], transform: str) -> bool:
+        overrides = getattr(self, branch)
+        return overrides is not None and any(
+            field.startswith(transform + "_") and getattr(overrides, field) is not None
+            for field in ImageAugmentationOverrides.model_fields
+        )
+
+    def for_branch(self, branch: Literal["drawing", "hatch"]) -> "AugmentationSettings":
+        """Resolve partial overrides, validating ranges after inheritance."""
+        data = self.model_dump(exclude={"drawing", "hatch"})
+        overrides = getattr(self, branch)
+        if overrides is not None:
+            patch = overrides.model_dump(exclude_none=True)
+            data.update(patch)
+        # The global switch always wins, including over branch enabled: true.
+        data["enabled"] = self.enabled and data["enabled"]
+        return AugmentationSettings.model_validate(data)
 
     @model_validator(mode="after")
     def validate_ranges(self) -> "AugmentationSettings":
@@ -49,15 +143,23 @@ class AugmentationSettings(StrictModel):
             raise ValueError("blur_kernel_size must be odd")
         ranges = (
             ("affine_scale", self.affine_scale_min, self.affine_scale_max),
+            ("resize_scale", self.resize_scale_min, self.resize_scale_max),
             ("brightness", self.brightness_min, self.brightness_max),
             ("contrast", self.contrast_min, self.contrast_max),
             ("gamma", self.gamma_min, self.gamma_max),
             ("blur_sigma", self.blur_sigma_min, self.blur_sigma_max),
             ("noise_std", self.noise_std_min, self.noise_std_max),
+            ("color_overlay_alpha", self.color_overlay_alpha_min, self.color_overlay_alpha_max),
         )
         for name, minimum, maximum in ranges:
             if minimum > maximum:
                 raise ValueError(f"{name}_min must not exceed {name}_max")
+        for branch in ("drawing", "hatch"):
+            if getattr(self, branch) is not None:
+                try:
+                    self.for_branch(branch)
+                except ValueError as error:
+                    raise ValueError(f"augmentation.{branch}: {error}") from error
         return self
 
 class TransformerSettings(StrictModel):
@@ -68,6 +170,14 @@ class TransformerSettings(StrictModel):
     mlp_ratio: float = Field(default=4.0, gt=0.0, allow_inf_nan=False)
     dropout: float = Field(default=0.0, ge=0.0, le=1.0)
     initial_gate: float = Field(default=0.01, allow_inf_nan=False)
+
+class CrossAttentionSettings(StrictModel):
+    level: int = Field(ge=0)
+    num_heads: int = Field(default=8, gt=0)
+    downsample: int = Field(default=1, ge=1)
+    dropout: float = Field(default=0.0, ge=0.0, le=1.0)
+    initial_gate: float = Field(default=0.01, allow_inf_nan=False)
+
 
 class PixelCorrelationSettings(StrictModel):
     enabled: bool = False
@@ -95,6 +205,7 @@ class ModelSettings(StrictModel):
 
     transformers: list[TransformerSettings] = Field(default_factory=list)
     hatch_transformers: list[TransformerSettings] = Field(default_factory=list)
+    cross_attention: list[CrossAttentionSettings] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -165,9 +276,22 @@ class ModelSettings(StrictModel):
                     raise ValueError(f"{name} channels must be divisible by 4")
                 if channels * transformer.mlp_ratio < 1:
                     raise ValueError(f"{name} feedforward dimension must be at least 1")
+        cross_attention_levels = set()
+        for attention in self.cross_attention:
+            level = attention.level
+            if level >= levels:
+                raise ValueError("cross_attention level must be smaller than the number of levels")
+            if level in cross_attention_levels:
+                raise ValueError(f"duplicate cross_attention level: {level}")
+            cross_attention_levels.add(level)
+            if self.match_dims[level] == 0:
+                raise ValueError("cross_attention requires an enabled matching level")
+            if self.match_dims[level] % attention.num_heads:
+                raise ValueError("cross_attention match_dim must be divisible by num_heads")
         return self
 
 class TrainingSettings(StrictModel):
+    load_new_model_config: bool = False
     pixel_correlation_lr_multiplier: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
     learning_rate: float = Field(default=0.00003, gt=0.0)
     weight_decay: float = Field(default=0.01, ge=0.0)
@@ -175,8 +299,10 @@ class TrainingSettings(StrictModel):
     tversky_fp_weight: float = Field(default=0.3, ge=0.0, le=1.0)
     tversky_fn_weight: float = Field(default=0.7, ge=0.0, le=1.0)
     epochs: int = Field(default=150, gt=0)
+    validation_interval: float = Field(default=1.0, gt=0, le=1, strict=True)
     batch_size: int = Field(default=1, gt=0)
     gradient_accumulation_steps: int = Field(default=16, gt=0)
+    max_consecutive_skipped_updates: int = Field(default=0, ge=0, strict=True)
     patience: int = Field(default=8, gt=0)
     num_workers: int = Field(default=4, ge=0)
     metric: Literal["val_loss"] = "val_loss"
@@ -198,6 +324,8 @@ class TrainingSettings(StrictModel):
 
     @model_validator(mode="after")
     def validate_training(self) -> "TrainingSettings":
+        if self.load_new_model_config and self.load_model_path and self.checkpoint_path:
+            raise ValueError("Specify only one of load_model_path and checkpoint_path")
         if abs(self.tversky_fp_weight + self.tversky_fn_weight - 1.0) > 1e-6:
             raise ValueError("tversky_fp_weight and tversky_fn_weight must sum to 1")
         if self.warmup_epochs >= self.epochs:
@@ -209,10 +337,40 @@ class TrainingSettings(StrictModel):
         return self
 
 
+class SearchMaskGenerationSettings(StrictModel):
+    enabled: bool = False
+    negative_fraction: float = Field(default=0.20, ge=0, le=1)
+    outside_window_share_of_negatives: float = Field(default=0.50, ge=0, le=1)
+    min_margin_fraction: float = Field(default=0, ge=0, lt=0.5)
+    area_fraction_min: float = Field(default=0.15, gt=0, le=1)
+    area_fraction_max: float = Field(default=0.65, gt=0, le=1)
+    aspect_ratio_min: float = Field(default=0.5, gt=0, allow_inf_nan=False)
+    aspect_ratio_max: float = Field(default=2.0, gt=0, allow_inf_nan=False)
+    min_positive_pixels: int = Field(default=32, ge=1)
+    full_tile_probability: float = Field(default=0, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> "SearchMaskGenerationSettings":
+        if self.area_fraction_min > self.area_fraction_max:
+            raise ValueError("area_fraction_min must not exceed area_fraction_max")
+        if self.aspect_ratio_min > self.aspect_ratio_max:
+            raise ValueError("aspect_ratio_min must not exceed aspect_ratio_max")
+        return self
+
+
 class DataSettings(StrictModel):
     dataset: Path | None = None
-    drawing_pad_multiple: int = Field(default=64, gt=0)
+    imgsz: ImageSide | tuple[ImageSide, ImageSide] | None = None
+    rect: bool = True
     load_dataset_examples: int = Field(default=16, gt=0)
+    search_mask_generation: SearchMaskGenerationSettings = Field(default_factory=SearchMaskGenerationSettings)
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_drawing_pad_multiple(cls, data: object) -> object:
+        if isinstance(data, dict) and "drawing_pad_multiple" in data:
+            return {key: value for key, value in data.items() if key != "drawing_pad_multiple"}
+        return data
 
 
 class OutputSettings(StrictModel):
@@ -239,6 +397,44 @@ class Config(StrictModel):
     output: OutputSettings = Field(default_factory=OutputSettings)
     augmentation: AugmentationSettings = Field(default_factory=AugmentationSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
+
+    @model_validator(mode="before")
+    @classmethod
+    def inherit_model_settings(cls, data):
+        if not isinstance(data, dict):
+            return data
+        training = data.get("training", {})
+        if isinstance(training, TrainingSettings):
+            training = training.model_dump()
+        if not isinstance(training, dict) or not training.get("load_new_model_config"):
+            return data
+        if training.get("load_model_path") and training.get("checkpoint_path"):
+            raise ValueError("Specify only one of load_model_path and checkpoint_path")
+        model = data.get("model", {})
+        if isinstance(model, ModelSettings):
+            model = model.model_dump(exclude_unset=True)
+        if not isinstance(model, dict):
+            return data  # Let the normal field validator describe malformed model data.
+        # Saved configurations are complete and must remain usable without the source file.
+        if isinstance(model, dict) and set(ModelSettings.model_fields) <= model.keys():
+            return data
+        source = training.get("load_model_path") or training.get("checkpoint_path")
+        if source:
+            saved = model_config_from_pt_data(torch.load(source, map_location="cpu", weights_only=True))
+            if saved is None:
+                raise ValueError("Architecture transfer requires a .pt file with model configuration")
+            return {**data, "model": merge_model_settings(saved, model)}
+        return data
+
+
+def merge_model_settings(saved: ModelSettings, overrides: dict) -> dict:
+    """Merge mappings recursively; lists are complete replacements."""
+    def merge(base, patch):
+        result = dict(base)
+        for key, value in patch.items():
+            result[key] = merge(result[key], value) if isinstance(value, dict) and isinstance(result.get(key), dict) else value
+        return result
+    return merge(saved.model_dump(), overrides)
 
 
 def config_from_pt_data(data: object) -> Config | None:
@@ -271,6 +467,10 @@ def load_config(path: Path) -> Config:
         data = yaml.safe_load(file)
     if not isinstance(data, dict):
         raise ValueError(f"Config must contain a YAML mapping: {path}")
+    if isinstance(data.get("training"), dict):
+        for name in ("load_model_path", "checkpoint_path"):
+            if data["training"].get(name) is not None:
+                data["training"][name] = _resolve_path(Path(data["training"][name]), path.parent)
     config = Config.model_validate(data)
     if config.data.dataset is not None:
         config.data.dataset = _resolve_path(config.data.dataset, path.parent)

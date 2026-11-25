@@ -21,6 +21,13 @@ model:
   kernel_size: 3
   downsample_stride: 2
 
+  cross_attention:
+   - level: 2
+     num_heads: 8
+     downsample: 1
+     dropout: 0.0
+     initial_gate: 0.01
+
   transformers:
     - level: 2
       num_heads: 8
@@ -47,9 +54,11 @@ training:
   # tversky_fp_weight: 0.3
   # tversky_fn_weight: 0.7
   epochs: 150
+  validation_interval: 1.0  # Fraction of each epoch. Use 0.5 for halfway and epoch end.
 
   batch_size: 1
   gradient_accumulation_steps: 16
+  max_consecutive_skipped_updates: 0  # 0 stops on the first NaN/Inf, 1 allows one skipped update in a row.
   patience: 8
   num_workers: 4
 
@@ -62,11 +71,24 @@ training:
   eta_min: 0.000001
   load_model_path: null
   checkpoint_path: null
+  load_new_model_config: false
 
 data:
   dataset: "./sample_dataset"
-  drawing_pad_multiple: 64
+  imgsz: null  # Base size before augmentation: longest side or [height, width].
+  rect: true   # Use the fitted rectangle. False centers the drawing on the requested canvas.
   load_dataset_examples: 16
+  search_mask_generation:
+    enabled: false
+    negative_fraction: 0.20
+    outside_window_share_of_negatives: 0.50
+    min_margin_fraction: 0.0
+    area_fraction_min: 0.15
+    area_fraction_max: 0.65
+    aspect_ratio_min: 0.5
+    aspect_ratio_max: 2.0
+    min_positive_pixels: 32
+    full_tile_probability: 0.0
 
 output:
   directory: "../runs/full_sample"
@@ -77,6 +99,7 @@ runtime:
   device: auto
 
 augmentation:
+  # Shared transforms use one decision and sampled parameters for both inputs.
   enabled: true
   seed: 42
   max_retries: 5
@@ -84,14 +107,20 @@ augmentation:
   horizontal_flip_probability: 0.5
   vertical_flip_probability: 0.5
 
-  drawing_rotate_90_probability: 0.75
-  hatch_rotate_90_probability: 0.75
+  rotate_90_probability: 0.75
 
   affine_probability: 0.5
   affine_angle_degrees: 2.0
   affine_translate_percent: 0.02
   affine_scale_min: 0.95
   affine_scale_max: 1.05
+
+  # Resize the image canvas; Masks always use nearest.
+  resize_probability: 0.0
+  resize_scale_min: 0.5
+  resize_scale_max: 1.5
+  resize_min_side: 1
+  resize_interpolation: nearest  # nearest, bilinear, bicubic, lanczos, random
 
   brightness_probability: 0.3
   brightness_min: 0.9
@@ -113,3 +142,27 @@ augmentation:
   noise_probability: 0.2
   noise_std_min: 0.002
   noise_std_max: 0.015
+
+  color_overlay_probability: 0.0  # Set to enable.
+  color_overlay_alpha_min: 0.02
+  color_overlay_alpha_max: 0.15
+
+  drawing: null
+  hatch: null
+  # Example overrides (replace the null values above):
+  # drawing:
+  #   affine_scale_min: 0.95
+  #   affine_scale_max: 1.05
+  #   noise_probability: 0.0
+  # hatch:
+  #   affine_probability: 0.8
+  #   affine_scale_min: 0.5
+  #   affine_scale_max: 1.5
+  #   rotate_90_probability: 0.75
+  #   blur_probability: 0.3
+  #   resize_probability: 0.8
+  #   resize_scale_min: 0.3
+  #   resize_scale_max: 2.0
+  #   resize_min_side: 16
+  #   resize_interpolation: nearest
+  # Use enabled: false inside either mapping to disable that branch.

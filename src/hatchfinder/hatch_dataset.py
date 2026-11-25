@@ -4,12 +4,14 @@ from torchvision.transforms.functional import to_tensor
 from pathlib import Path
 from contextlib import ExitStack
 import json
-import math
+import random
 import torch
 import torch.nn.functional as F
 
 from .augmentation import TrainingAugmentation
 from .config import AugmentationSettings, DataSettings
+from .image_geometry import fit_geometry, resize_input
+from .search_windows import SampleKind, generate_window_mask, sample_kind
 
 
 class HatchDataset(Dataset):
@@ -20,6 +22,8 @@ class HatchDataset(Dataset):
         data_config: DataSettings,
         augmentation_config: AugmentationSettings,
         augment: bool = False,
+        *,
+        include_sample_ids: bool = False,
     ):
         if dataset_type not in {"train", "valid"}:
             raise ValueError("dataset_type must be 'train' or 'valid'")
@@ -28,14 +32,47 @@ class HatchDataset(Dataset):
         self.path = path
         self.data_config = data_config
         self.augmentation_config = augmentation_config
-        self.augment = augment
+        self.split = dataset_type
+        self.generation = data_config.search_mask_generation
+        self.augment = augment and dataset_type == "train"
+        self.include_sample_ids = include_sample_ids
         self._augmentation = None
         self._augmentation_worker_id = None
+        self._window_rng = None
+        self._window_worker_id = None
+        self.window_start_epoch = 0
 
         with open(path / dataset_type / "manifest.jsonl", "r", encoding="utf-8") as f:
             for line in f:
                 item = json.loads(line)
-                self.items.append({"drawing": item["drawing"], "search_mask": item["search_mask"], "hatch": item["hatch"], "target": item["target"]})
+                entry = {name: item[name] for name in ("drawing", "hatch", "target")}
+                entry["search_mask"] = item.get("search_mask")
+                if include_sample_ids:
+                    entry["id"] = item.get("id")
+                if not entry["search_mask"] and not self.generation.enabled:
+                    raise ValueError(f"Missing search_mask for {entry['drawing']}. Supply a saved mask or "
+                                     "enable data.search_mask_generation with a whole-tile target.")
+                self.items.append(entry)
+        if self.split == "train" and any(not item["search_mask"] for item in self.items):
+            self._index_generation_targets()
+
+    def _index_generation_targets(self):
+        self._empty_targets = {}
+        self._absent_indices = []
+        self._present_indices = []
+        for index, item in enumerate(self.items):
+            if item["search_mask"]:
+                continue
+            with Image.open(self.path / item["target"]) as im:
+                empty = im.convert("L").getextrema()[1] <= 127
+            self._empty_targets[index] = empty
+            pool = self._absent_indices if empty else self._present_indices
+            pool.append(index)
+        cfg = self.generation
+        if cfg.negative_fraction > 0 and cfg.outside_window_share_of_negatives < 1 and not self._absent_indices:
+            raise ValueError("Search mask generation needs a pair with an empty whole-tile target for absent negatives")
+        if (cfg.negative_fraction < 1 or cfg.outside_window_share_of_negatives > 0) and not self._present_indices:
+            raise ValueError("Search mask generation needs a pair with a nonempty whole-tile target")
 
     def __len__(self):
         return len(self.items)
@@ -54,6 +91,47 @@ class HatchDataset(Dataset):
         return self._augmentation
 
     def __getitem__(self, index):
+        index = range(len(self.items))[index]
+        if self.items[index]["search_mask"]:
+            return self._read_item(index)
+
+        if self.split == "valid":
+            rng = random.Random(f"{self.augmentation_config.seed}:valid:{index}")
+            kind = None  # Keep this validation pair and its natural positive/absent type.
+            pool = [index]
+        else:
+            worker = get_worker_info()
+            worker_id = worker.id if worker is not None else -1
+            if self._window_worker_id != worker_id:
+                seed = self.augmentation_config.seed + (worker.seed if worker is not None else 0)
+                if self.window_start_epoch:
+                    seed = f"{seed}:{self.window_start_epoch}"
+                self._window_rng = random.Random(seed)
+                self._window_worker_id = worker_id
+            rng = self._window_rng
+            kind = sample_kind(self.generation, rng)
+            pool = self._absent_indices if kind == "absent" else self._present_indices
+
+        full_tile = kind != "outside" and rng.random() < self.generation.full_tile_probability
+        for attempt in range(17):
+            # Try the same size on other pairs before sampling new dimensions.
+            quantiles = (rng.random(), rng.random())
+            exhaustive = attempt == 16
+            candidates = rng.sample(pool, len(pool) if exhaustive else min(4, len(pool)))
+            if self.split == "train" and attempt == 0 and self._empty_targets[index] == (kind == "absent"):
+                candidates = [index] + [candidate for candidate in candidates if candidate != index]
+            for candidate in candidates:
+                result = self._read_item(candidate, kind, rng, quantiles, full_tile, exhaustive)
+                if result is not None:
+                    return result
+        raise ValueError(
+            f"No legal {kind or 'validation'} search window found in {self.split} "
+            f"(requested row {index}). Check tile dimensions, window ranges, margins, "
+            "min_positive_pixels and target coverage."
+        )
+
+    def _read_item(self, index, kind: SampleKind | None = None, rng=None, quantiles=None,
+                   full_tile=False, exhaustive=False):
         item = self.items[index]
         with ExitStack() as images:
             def load(name: str, mode: str) -> Image.Image:
@@ -63,9 +141,26 @@ class HatchDataset(Dataset):
                 return converted
 
             drawing = load("drawing", "RGB")
-            mask = load("search_mask", "L")
             hatch = load("hatch", "RGB")
             target = load("target", "L")
+            if drawing.size != target.size:
+                raise ValueError(f"Drawing and target sizes differ for {item['drawing']}")
+            if rng is None:
+                mask = load("search_mask", "L")
+                if drawing.size != mask.size:
+                    raise ValueError(f"Drawing and search mask sizes differ for {item['drawing']}")
+            else:
+                mask = Image.new("L", drawing.size, 255)
+                images.callback(mask.close)
+                if kind is None:
+                    kind = "positive" if target.getextrema()[1] > 127 else "absent"
+
+            scale, padding = fit_geometry(drawing.size, self.data_config.imgsz, self.data_config.rect)
+            if scale != 1.0 or any(padding):
+                drawing = resize_input(drawing, "RGB", scale, images, padding)
+                hatch = resize_input(hatch, "RGB", scale, images)
+                mask = resize_input(mask, "L", scale, images, padding)
+                target = resize_input(target, "L", scale, images, padding)
 
             if self.augment:
                 drawing, mask, hatch, target = self._get_augmentation()(
@@ -74,17 +169,34 @@ class HatchDataset(Dataset):
                 for image in (drawing, mask, hatch, target):
                     images.callback(image.close)
 
+            if rng is not None:
+                content = mask if self.data_config.imgsz is not None and not self.data_config.rect else None
+                mask = generate_window_mask(target, kind, self.generation, rng, quantiles, full_tile,
+                                            exhaustive=exhaustive, content=content)
+                if mask is None:
+                    return None
+                images.callback(mask.close)
+
             drawing_tensor = to_tensor(drawing)
             mask_tensor = (to_tensor(mask) > 0.5).float()
             hatch_tensor = to_tensor(hatch)
             target_tensor = (to_tensor(target) > 0.5).float()
+            if rng is not None:
+                target_tensor.mul_(mask_tensor)
 
-        return {
+        result = {
             "drawing": drawing_tensor,
             "search_mask": mask_tensor,
             "hatch": hatch_tensor,
             "target": target_tensor,
         }
+        if rng is not None and self.split == "train":
+            result["sample_kind"] = kind
+        if self.include_sample_ids:
+            result["sample_id"] = item["id"] if item["id"] is not None else (
+                f"{self.split}/manifest.jsonl:{index + 1} ({item['target']})"
+            )
+        return result
 
     def pad_tensor(
         self,
@@ -97,6 +209,8 @@ class HatchDataset(Dataset):
 
         pad_h = target_h - h
         pad_w = target_w - w
+        if pad_h == 0 and pad_w == 0:
+            return tensor
 
         return F.pad(
             tensor,
@@ -107,10 +221,6 @@ class HatchDataset(Dataset):
     def collate_fn(self, batch):
         max_h = max(item["drawing"].shape[-2] for item in batch)
         max_w = max(item["drawing"].shape[-1] for item in batch)
-
-        multiple = self.data_config.drawing_pad_multiple
-        max_h = math.ceil(max_h / multiple) * multiple
-        max_w = math.ceil(max_w / multiple) * multiple
 
         max_hatch_h = max(item["hatch"].shape[-2] for item in batch)
         max_hatch_w = max(item["hatch"].shape[-1] for item in batch)
@@ -157,9 +267,15 @@ class HatchDataset(Dataset):
                 )
             )
 
-        return {
+        result = {
             "drawing": torch.stack(drawings),
             "search_mask": torch.stack(masks),
             "hatch": torch.stack(hatches),
             "target": torch.stack(targets),
         }
+        sample_kinds = [item["sample_kind"] for item in batch if "sample_kind" in item]
+        if sample_kinds:
+            result["sample_kind"] = sample_kinds
+        if self.include_sample_ids:
+            result["sample_ids"] = [item["sample_id"] for item in batch]
+        return result

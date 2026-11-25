@@ -2,8 +2,11 @@ from pathlib import Path
 from contextlib import ExitStack
 
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torchvision.transforms.functional import to_pil_image, to_tensor
+
+from .image_geometry import fit_geometry, resize_input
 
 
 def image_to_tensor(model, image: Image.Image, mode: str) -> torch.Tensor:
@@ -25,35 +28,54 @@ def infer(
     hatch: Image.Image | Path,
     debug_path: Path | None = None,
     confidence: float | None = None,
+    *,
+    imgsz: int | tuple[int, int] | None = None,
+    rect: bool = True,
 ) -> torch.Tensor:
     model.eval()
     drawing_name = drawing.stem if isinstance(drawing, Path) else "inference"
-    with ExitStack() as owned_images:
-        def open_if_path(value: Image.Image | Path, mode: str) -> Image.Image:
-            if not isinstance(value, Path):
-                return value
-            with Image.open(value) as source:
-                converted = source.convert(mode)
-            owned_images.callback(converted.close)
-            return converted
+    with ExitStack() as owned_images, torch.inference_mode():
+        def open_if_path(value: Image.Image | Path) -> Image.Image:
+            return owned_images.enter_context(Image.open(value)) if isinstance(value, Path) else value
 
-        drawing = open_if_path(drawing, "RGB")
-        mask = open_if_path(mask, "L")
-        hatch = open_if_path(hatch, "RGB")
+        drawing = open_if_path(drawing)
+        mask = open_if_path(mask)
+        hatch = open_if_path(hatch)
+        if mask.size != drawing.size:
+            raise ValueError("Drawing and mask must have the same spatial size")
+        if min(*drawing.size, *hatch.size) < 1:
+            raise ValueError("Drawing and hatch dimensions must be positive")
+        scale, padding = fit_geometry(drawing.size, imgsz, rect)
+        scaled_drawing = resize_input(drawing, "RGB", scale, owned_images)
         drawing_tensor, mask_tensor, hatch_tensor = model.convert_images_to_tensors(
-            drawing, mask, hatch
+            scaled_drawing, resize_input(mask, "L", scale, owned_images),
+            resize_input(hatch, "RGB", scale, owned_images),
         )
-    with torch.inference_mode():
-        heatmap = torch.sigmoid(model(drawing_tensor, mask_tensor, hatch_tensor))
-        heatmap = heatmap * mask_tensor
+        if any(padding):
+            padded_drawing = F.pad(drawing_tensor, padding, value=1.0)
+            padded_mask = F.pad(mask_tensor, padding, value=0.0)
+            logits = model(padded_drawing, padded_mask, hatch_tensor)
+            left, _, top, _ = padding
+            logits = logits[..., top:top + scaled_drawing.height, left:left + scaled_drawing.width]
+        else:
+            logits = model(drawing_tensor, mask_tensor, hatch_tensor)
+        heatmap = torch.sigmoid(logits) * mask_tensor
+        if scaled_drawing.size != drawing.size:
+            heatmap = F.interpolate(heatmap, size=(drawing.height, drawing.width),
+                                    mode="bilinear", align_corners=False)
+            mask_tensor = (model._image_to_tensor(mask, "L") > 0.5).float()
+            heatmap.mul_(mask_tensor)
 
-    if debug_path is not None:
-        confidence = 0.5 if confidence is None else confidence
-        if not 0.0 <= confidence <= 1.0:
-            raise ValueError("confidence must be between 0 and 1")
-        model._save_inference_debug(
-            drawing_tensor, mask_tensor, heatmap, debug_path, drawing_name, confidence
-        )
+        if debug_path is not None:
+            confidence = 0.5 if confidence is None else confidence
+            if not 0.0 <= confidence <= 1.0:
+                raise ValueError("confidence must be between 0 and 1")
+            if scaled_drawing.size != drawing.size:
+                with drawing.convert("RGB") as original:
+                    drawing_tensor = to_tensor(original).unsqueeze(0)
+            model._save_inference_debug(
+                drawing_tensor, mask_tensor, heatmap, debug_path, drawing_name, confidence
+            )
     return heatmap
 
 
