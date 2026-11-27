@@ -1,4 +1,5 @@
 
+from collections.abc import Hashable
 from typing import Any, Literal
 
 import torch
@@ -123,6 +124,25 @@ class HatchFinder(nn.Module):
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
+    def clear_inference_cache(self) -> None:
+        """Release cached encoder outputs, including any tensors on the GPU."""
+        self._drawing_cache = inference.FeatureCache(capacity=1)
+        self._hatch_cache = inference.FeatureCache(capacity=16)
+
+    def train(self, mode: bool = True):
+        if mode:
+            self.clear_inference_cache()
+        return super().train(mode)
+
+    def _apply(self, fn, *args, **kwargs):
+        # Module.to(), dtype changes and device moves also discard old features.
+        self.clear_inference_cache()
+        return super()._apply(fn, *args, **kwargs)
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        self.clear_inference_cache()
+        return super()._load_from_state_dict(*args, **kwargs)
+
     def _validate_inputs(
         self,
         drawing: torch.Tensor,
@@ -158,15 +178,9 @@ class HatchFinder(nn.Module):
     def _image_to_tensor(self, image: Image.Image, mode: str) -> torch.Tensor:
         return inference.image_to_tensor(self, image, mode)
 
-    def _get_vectors(
-        self,
-        drawing_features: list[torch.Tensor],
-        hatch: torch.Tensor,
-    ):
+    def _encode_hatch(self, hatch: torch.Tensor):
         hatch_features = self.hatch_encoder(hatch)
-
-        drawing_vectors = [None] * len(drawing_features)
-        hatch_vectors = [None] * len(drawing_features)
+        hatch_vectors = [None] * len(hatch_features)
         pooled_hatches = {}
 
         for level, feature in enumerate(hatch_features):
@@ -185,6 +199,11 @@ class HatchFinder(nn.Module):
             if key in self.cross_attention:
                 pooled_hatches[key] = pooled_feature
 
+        return hatch_vectors, pooled_hatches
+
+    def _encode_drawing(self, drawing: torch.Tensor, mask: torch.Tensor):
+        drawing_features = self.drawing_encoder(drawing, mask)
+        drawing_vectors = [None] * len(drawing_features)
         for level, features in enumerate(drawing_features):
             key = str(level)
             if key not in self.drawing_projections:
@@ -192,16 +211,12 @@ class HatchFinder(nn.Module):
 
             drawing_vectors[level] = self.drawing_projections[key](features)
 
-        local_matching = {
-            key: branch(drawing_vectors[int(key)], pooled_hatches[key])
-            for key, branch in self.cross_attention.items()
-        }
-        return drawing_vectors, hatch_vectors, local_matching
+        return drawing_features, drawing_vectors
 
     def convert_images_to_tensors(self, drawing: Image.Image, mask: Image.Image, hatch: Image.Image):
         return inference.convert_images_to_tensors(self, drawing, mask, hatch)
 
-    def forward(self, drawing: torch.Tensor, mask: torch.Tensor, hatch: torch.Tensor,):
+    def forward(self, drawing: torch.Tensor, mask: torch.Tensor, hatch: torch.Tensor, *, _feature_keys=None):
         self._validate_inputs(drawing, mask, hatch)
 
         if self.pixel_correlation is not None and drawing.shape[0] != 1:
@@ -212,9 +227,22 @@ class HatchFinder(nn.Module):
         mask = mask.to(device, non_blocking=True)
         hatch = hatch.to(device, non_blocking=True)
 
-        drawing_features = self.drawing_encoder(drawing, mask)
-        drawing_vectors, hatch_vectors, local_matching = self._get_vectors(drawing_features, hatch)
+        if _feature_keys is None:
+            drawing_features, drawing_vectors = self._encode_drawing(drawing, mask)
+            hatch_vectors, pooled_hatches = self._encode_hatch(hatch)
+        else:
+            if self.training or not torch.is_inference_mode_enabled():
+                raise RuntimeError("Feature keys require inference mode and model.eval()")
+            drawing_key, hatch_key = _feature_keys
+            drawing_features, drawing_vectors = self._drawing_cache.get_or_compute(
+                drawing_key, self._encode_drawing, drawing, mask)
+            hatch_vectors, pooled_hatches = self._hatch_cache.get_or_compute(
+                hatch_key, self._encode_hatch, hatch)
 
+        local_matching = {
+            key: branch(drawing_vectors[int(key)], pooled_hatches[key])
+            for key, branch in self.cross_attention.items()
+        }
         matching_map = self.output_comparison(
             drawing_vectors,
             hatch_vectors,
@@ -244,6 +272,8 @@ class HatchFinder(nn.Module):
         imgsz: int | tuple[int, int] | None = None,
         rect: bool = True,
         precision: inference.InferencePrecision | None = None,
+        drawing_key: Hashable | None = None,
+        hatch_key: Hashable | None = None,
     ) -> torch.Tensor:
         """Fit the inputs to imgsz and return probabilities at the original drawing size.
 
@@ -251,9 +281,12 @@ class HatchFinder(nn.Module):
         mask are centered on that canvas. With imgsz=None all inputs keep their size.
         precision selects fp32, fp16 or bf16 for the forward pass. Omitting it
         preserves the caller's autocast settings. Explicit modes return FP32 probabilities.
+        drawing_key identifies the drawing and search mask together. hatch_key identifies
+        the legend. Each optional key enables feature reuse for its branch.
         """
         return inference.infer(self, drawing, mask, hatch, debug_path, confidence,
-                               imgsz=imgsz, rect=rect, precision=precision)
+                               imgsz=imgsz, rect=rect, precision=precision,
+                               drawing_key=drawing_key, hatch_key=hatch_key)
 
     @staticmethod
     def _save_inference_debug(

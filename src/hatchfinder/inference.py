@@ -1,5 +1,8 @@
 from pathlib import Path
+from collections import OrderedDict
+from collections.abc import Hashable
 from contextlib import ExitStack, nullcontext
+from threading import Lock
 from typing import Literal
 
 import torch
@@ -11,6 +14,46 @@ from .image_geometry import fit_geometry, resize_input
 
 
 InferencePrecision = Literal["fp32", "fp16", "bf16"]
+
+
+class FeatureCache:
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self.entries = OrderedDict()
+        self.lock = Lock()
+
+    def __reduce__(self):
+        # Copies and serialized models start with an empty inference cache.
+        return type(self), (self.capacity,)
+
+    def get_or_compute(self, key, encode, *inputs):
+        if key is None:
+            return encode(*inputs)
+        with self.lock:
+            if key in self.entries:
+                self.entries.move_to_end(key)
+                return self.entries[key]
+            if len(self.entries) == self.capacity:
+                self.entries.popitem(last=False)
+        features = encode(*inputs)
+        with self.lock:
+            self.entries[key] = features
+            self.entries.move_to_end(key)
+            if len(self.entries) > self.capacity:
+                self.entries.popitem(last=False)
+        return features
+
+
+def _feature_context(device: torch.device):
+    # Inspect the active scope so an external autocast works just like precision=.
+    if hasattr(torch, "get_autocast_dtype"):
+        dtype = torch.get_autocast_dtype(device.type) if torch.is_autocast_enabled(device.type) else None
+    elif device.type == "cpu":  # PyTorch < 2.4
+        dtype = torch.get_autocast_cpu_dtype() if torch.is_autocast_cpu_enabled() else None
+    else:
+        dtype = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else None
+    stream = torch.cuda.current_stream(device).cuda_stream if device.type == "cuda" else None
+    return device, dtype, stream
 
 
 def _autocast_context(device: torch.device, precision: InferencePrecision | None):
@@ -49,6 +92,8 @@ def infer(
     imgsz: int | tuple[int, int] | None = None,
     rect: bool = True,
     precision: InferencePrecision | None = None,
+    drawing_key: Hashable | None = None,
+    hatch_key: Hashable | None = None,
 ) -> torch.Tensor:
     autocast = _autocast_context(model.device, precision)
     model.eval()
@@ -75,7 +120,15 @@ def infer(
             model_drawing = F.pad(drawing_tensor, padding, value=1.0)
             model_mask = F.pad(mask_tensor, padding, value=0.0)
         with autocast:
-            logits = model(model_drawing, model_mask, hatch_tensor)
+            if drawing_key is None and hatch_key is None:
+                logits = model(model_drawing, model_mask, hatch_tensor)
+            else:
+                context = _feature_context(model_drawing.device)
+                if drawing_key is not None:
+                    drawing_key = (drawing_key, drawing.size, scaled_drawing.size, padding, context)
+                if hatch_key is not None:
+                    hatch_key = (hatch_key, hatch.size, hatch_tensor.shape[-2:], context)
+                logits = model(model_drawing, model_mask, hatch_tensor, _feature_keys=(drawing_key, hatch_key))
         if any(padding):
             left, _, top, _ = padding
             logits = logits[..., top:top + scaled_drawing.height, left:left + scaled_drawing.width]
