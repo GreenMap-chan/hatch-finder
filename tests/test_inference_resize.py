@@ -70,6 +70,27 @@ class InferenceResizeTests(unittest.TestCase):
                 self.assertEqual(restored.shape, (1, 1, 9, 5))
                 torch.testing.assert_close(restored, fitted)
 
+    def test_precision_applies_to_forward_and_preserves_caller_autocast(self):
+        dtypes = []
+        conv = self.model.drawing_encoder.blocks[0][0]
+        with (Image.new("RGB", (19, 13), "white") as drawing, Image.new("L", drawing.size, 255) as mask,
+              Image.new("RGB", (7, 5), "gray") as hatch,
+              conv.register_forward_hook(lambda module, args, result: dtypes.append(result.dtype))):
+            mask.paste(0, (0, 0, 4, 13))
+            options = dict(imgsz=24, rect=False)
+            baseline = self.model.infer(drawing, mask, hatch, **options)
+            mixed = self.model.infer(drawing, mask, hatch, precision="bf16", **options)
+            with torch.autocast("cpu", dtype=torch.bfloat16):
+                full = self.model.infer(drawing, mask, hatch, precision="fp32", **options)
+                self.model.infer(drawing, mask, hatch, **options)
+
+        self.assertEqual(dtypes, [torch.float32, torch.bfloat16, torch.float32, torch.bfloat16])
+        torch.testing.assert_close(full, baseline, atol=0, rtol=0)
+        self.assertEqual(mixed.dtype, torch.float32)
+        self.assertEqual(mixed.shape, baseline.shape)
+        self.assertTrue(mixed.isfinite().all())
+        self.assertFalse(mixed[..., :4].any())
+
     def test_native_size_and_invalid_arguments(self):
         with (Image.new("RGB", (19, 17)) as drawing, Image.new("L", drawing.size, 255) as mask,
               Image.new("RGB", (7, 5)) as hatch):
@@ -81,5 +102,7 @@ class InferenceResizeTests(unittest.TestCase):
                     self.model.infer(drawing, mask, hatch, imgsz=imgsz)
             with self.assertRaisesRegex(ValueError, "rect"):
                 self.model.infer(drawing, mask, hatch, imgsz=16, rect="false")
+            with self.assertRaisesRegex(ValueError, "precision"):
+                self.model.infer(drawing, mask, hatch, precision="fp8")
             with Image.new("L", (18, 17)) as wrong_mask, self.assertRaisesRegex(ValueError, "same spatial size"):
                 self.model.infer(drawing, wrong_mask, hatch, imgsz=16)

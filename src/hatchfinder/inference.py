@@ -1,5 +1,6 @@
 from pathlib import Path
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -7,6 +8,22 @@ from PIL import Image
 from torchvision.transforms.functional import to_pil_image, to_tensor
 
 from .image_geometry import fit_geometry, resize_input
+
+
+InferencePrecision = Literal["fp32", "fp16", "bf16"]
+
+
+def _autocast_context(device: torch.device, precision: InferencePrecision | None):
+    if precision is None:
+        return nullcontext()
+    if precision == "fp32":
+        return torch.autocast(device.type, enabled=False)
+    if precision not in ("fp16", "bf16"):
+        raise ValueError("precision must be 'fp32', 'fp16', 'bf16', or None")
+    dtype = torch.float16 if precision == "fp16" else torch.bfloat16
+    # Autocast checks BF16 support on the currently selected CUDA device.
+    with torch.cuda.device(device) if device.type == "cuda" else nullcontext():
+        return torch.autocast(device.type, dtype=dtype)
 
 
 def image_to_tensor(model, image: Image.Image, mode: str) -> torch.Tensor:
@@ -31,7 +48,9 @@ def infer(
     *,
     imgsz: int | tuple[int, int] | None = None,
     rect: bool = True,
+    precision: InferencePrecision | None = None,
 ) -> torch.Tensor:
+    autocast = _autocast_context(model.device, precision)
     model.eval()
     drawing_name = drawing.stem if isinstance(drawing, Path) else "inference"
     with ExitStack() as owned_images, torch.inference_mode():
@@ -51,14 +70,17 @@ def infer(
             scaled_drawing, resize_input(mask, "L", scale, owned_images),
             resize_input(hatch, "RGB", scale, owned_images),
         )
+        model_drawing, model_mask = drawing_tensor, mask_tensor
         if any(padding):
-            padded_drawing = F.pad(drawing_tensor, padding, value=1.0)
-            padded_mask = F.pad(mask_tensor, padding, value=0.0)
-            logits = model(padded_drawing, padded_mask, hatch_tensor)
+            model_drawing = F.pad(drawing_tensor, padding, value=1.0)
+            model_mask = F.pad(mask_tensor, padding, value=0.0)
+        with autocast:
+            logits = model(model_drawing, model_mask, hatch_tensor)
+        if any(padding):
             left, _, top, _ = padding
             logits = logits[..., top:top + scaled_drawing.height, left:left + scaled_drawing.width]
-        else:
-            logits = model(drawing_tensor, mask_tensor, hatch_tensor)
+        if precision is not None:
+            logits = logits.float()
         heatmap = torch.sigmoid(logits) * mask_tensor
         if scaled_drawing.size != drawing.size:
             heatmap = F.interpolate(heatmap, size=(drawing.height, drawing.width),

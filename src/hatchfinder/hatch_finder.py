@@ -243,14 +243,17 @@ class HatchFinder(nn.Module):
         *,
         imgsz: int | tuple[int, int] | None = None,
         rect: bool = True,
+        precision: inference.InferencePrecision | None = None,
     ) -> torch.Tensor:
         """Fit the inputs to imgsz and return probabilities at the original drawing size.
 
         A pair specifies (height, width). With rect=False the drawing and search
         mask are centered on that canvas. With imgsz=None all inputs keep their size.
+        precision selects fp32, fp16 or bf16 for the forward pass. Omitting it
+        preserves the caller's autocast settings. Explicit modes return FP32 probabilities.
         """
         return inference.infer(self, drawing, mask, hatch, debug_path, confidence,
-                               imgsz=imgsz, rect=rect)
+                               imgsz=imgsz, rect=rect, precision=precision)
 
     @staticmethod
     def _save_inference_debug(
