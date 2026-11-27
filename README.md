@@ -100,6 +100,32 @@ nearest-neighbor resizing and zero padding. The legend keeps its scaled size.
 Both modes return the heatmap and debug overlay in the original drawing
 coordinates, with heatmap values set to zero outside the original search mask.
 
+### Reuse encoder features
+
+Pass either or both keys when an input is reused across calls on the same model:
+
+```python
+heatmap = model.infer(
+    drawing, mask, hatch,
+    drawing_key=(sheet_id, tile_x, tile_y, mask_id),
+    hatch_key=(legend_id, legend_scale),
+    precision="fp16",
+)
+```
+
+Use stable, hashable IDs. Change `drawing_key` whenever the tile pixels or
+search mask change, and change `hatch_key` when the legend pixels change.
+Include a document or revision ID when reusing names across different inputs.
+The library uses these IDs directly and accounts for its own resizing, padding
+and active inference precision. An omitted key runs that encoder on every call.
+
+Each model retains features for its most recent keyed tile and up to 16 keyed
+legends on the inference device. Legend entries are evicted in least-recently-used
+order. Matching and pixel correlation still run for each pair.
+Call `model.clear_inference_cache()` to release the features, or after editing
+weights in place. Loading a state dict, entering training mode or moving the
+model to another device or dtype clears both caches automatically.
+
 ## Cross-attention matching
 
 Optional cross-attention compares drawing locations with individual pooled hatch

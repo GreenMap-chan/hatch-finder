@@ -38,13 +38,19 @@ class PixelCorrelation(nn.Module):
                 tuple(max(2, size // self.downsample) for size in hatch.shape[-2:]),
             )
             scores, regions = [], []
+            window_stats = {}
             for rotation in range(4):
                 kernel = torch.rot90(template, rotation, (-2, -1))
                 height, width = kernel.shape[-2:]
                 kernel = kernel - kernel.mean()
-                padded = F.pad(gray, ((width-1)//2, width//2, (height-1)//2, height//2), value=1.0)
-                mean = F.avg_pool2d(padded, (height, width), stride=1)
-                variance = (F.avg_pool2d(padded.square(), (height, width), stride=1) - mean.square()).clamp_min(1e-7)
+                # Rotations with the same window size share the drawing's local statistics.
+                window_size = (height, width)
+                if window_size not in window_stats:
+                    padded = F.pad(gray, ((width-1)//2, width//2, (height-1)//2, height//2), value=1.0)
+                    mean = F.avg_pool2d(padded, window_size, stride=1)
+                    variance = (F.avg_pool2d(padded.square(), window_size, stride=1) - mean.square()).clamp_min(1e-7)
+                    window_stats[window_size] = padded, variance
+                padded, variance = window_stats[window_size]
                 numerator = F.conv2d(padded, kernel)
                 denominator = (variance * height * width * kernel.square().sum()).clamp_min(1e-10).sqrt()
                 score = (numerator / denominator).clamp(-1, 1)
